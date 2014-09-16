@@ -1,0 +1,6 @@
+/**
+ * Environment configuration
+ */
+ 
+#define GFSFCGI_VERSION "@GIRDFSFCGI_VERSION@"
+#define GFSFCGI_CONFIG_FILE "@GFSFCGI_CONFIG_FILE@"

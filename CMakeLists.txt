@@ -11,10 +11,15 @@ IF(CMAKE_COMPILER_IS_GNUCXX)
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fmessage-length=0")
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
+option(GFSFCGI_CONFIG_FILE "The default config file location" "/etc/gridfs-fcgi/gridfs-fcgi.conf")
+
+find_package(MongoDB REQUIRED)
+find_package(Boost REQUIRED COMPONENTS asio)
+
 configure_file(
-    "${PROJECT_SOURCE_DIR}/include/config.h.in"
-    "${PROJECT_SOURCE_DIR}/include/config.h"
+    "${PROJECT_SOURCE_DIR}/src/config.h.in"
+    "${PROJECT_SOURCE_DIR}/src/config.h"
 )
 
-include_directories("${PROJECT_SOURCE_DIR}/include")
 add_executable(gridfs-fcgi src/main.cpp)
