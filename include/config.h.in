@@ -1,5 +1,0 @@
-/**
- * Environment configuration
- */
- 
-#define GIRDFSFCGI_VERSION @GIRDFSFCGI_VERSION@
