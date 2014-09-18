@@ -2,7 +2,6 @@
 #include "config.h"
 #include "application.hpp"
 #include <iostream>
-//#include <mongo/client/gridfs.h>
 
 using namespace gfsfcgi;
 
