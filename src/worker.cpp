@@ -43,7 +43,10 @@ namespace gfsfcgi
 		std::lock_guard lock(this->mutex);
 
 		if (this->last == NULL) {
-			this->freeList(); // ensure first pointer is released
+			if (this->first == NULL) {
+			    throw RuntimeException("Inconsistent worker state: Initial list pointer is not null.");
+			}
+
 			this->first = this->last = new RequestList;
 			this->last->handler = handler;
 		} else {
@@ -60,6 +63,7 @@ namespace gfsfcgi
 
 	void Worker::freeList()
 	{
+	    this->assertSameThreadContext();
 		RequestList* current = this->first;
 
 		while (current != NULL) {
@@ -75,9 +79,13 @@ namespace gfsfcgi
 
 	void Worker::remove(RequestList* item)
 	{
+	    if (item == NULL) {
+	        throw NullPointerException("Request list item");
+	    }
+
+	    this->assertSameThreadContext();
 		std::lock_guard lock(this->mutex);
 
-		// todo: validate first/last pointer
 		if ((item->previous == NULL) && (item->next != NULL)) {
 			this->first = item->next;
 		} else if ((item->next == NULL) && (item->previous != NULL)) {
@@ -98,12 +106,25 @@ namespace gfsfcgi
 		this->size--;
 	}
 
+	/**
+	 * Move to next list pointer
+	 */
 	Worker::RequestList* Worker::next(RequestList* item)
 	{
-		std::lock_guard lock(this->mutex);
+	    this->assertSameThreadContext();
 		return item->next;
 	}
 
+    void Worker::assertSameThreadContext()
+    {
+        if (this->thread->get_id() != std::this_thread::get_id()) {
+            throw ThreadContextViolatedException("Request list cannot be freed from another thread");
+        }
+    }
+
+    /**
+     * Run this worker (threaded)
+     */
 	void Worker::run()
 	{
 		this->thread = new std::thread(std::bind(Worker::doRun(), this));
@@ -132,4 +153,7 @@ namespace gfsfcgi
 		}
 	}
 
+    void Worker::exit()
+    {
+    }
 }

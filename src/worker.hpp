@@ -5,6 +5,7 @@
 #include <mutex>
 #include <sstream>
 
+#include "exceptions.hpp"
 #include "requesthandler.hpp"
 #include "dealloc_guard.hpp"
 
@@ -12,23 +13,6 @@ namespace gfsfcgi
 {
 	class Worker
 	{
-		public:
-			class NullPointerException : public std::exception
-			{
-				private:
-					const char* name;
-
-				public:
-					inline NullPointerException(const char* name) : name(name) {};
-					inline ~NullPointerException() throw() {};
-
-					inline const char* what() const throw() {
-						std::ostringstream o;
-						o << "NullPointerException: " << this->name << " is NULL";
-						return o.str().c_str();
-					}
-			};
-
 		protected:
 			struct RequestList {
 				RequestHandler* handler = NULL;
@@ -44,10 +28,12 @@ namespace gfsfcgi
 			RequestList* last;
 			DeallocatorGuard allocatorGuard;
 
-			void freeList();
 			void doRun();
 
 		private:
+			void inline assertSameThreadContext() throw (ThreadContextViolatedException);
+
+			void freeList();
 			void remove(RequestList* item);
 			RequestList* next(RequestList* item);
 

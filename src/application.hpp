@@ -3,6 +3,8 @@
 #include <string>
 #include <mongo/client/dbclientinterface.h>
 
+#include "requesthandler.hpp"
+
 namespace gfsfcgi
 {
     /**
@@ -12,6 +14,13 @@ namespace gfsfcgi
     {
         public:
             virtual inline ~Options() {};
+    };
+
+    class RequestHandlerFactoryInterface
+    {
+        public:
+            virtual inline ~RequestHandlerFactoryInterface() {};
+            virtual RequestHandler* createRequestHandler() const = 0;
     };
 
     /**
@@ -39,8 +48,10 @@ namespace gfsfcgi
             virtual inline ~ConfigOptions() {};
     };
 
-
-    class Factory
+    /**
+     * Dependency factory class
+     */
+    class Factory : public RequestHandlerFactoryInterface
     {
         protected:
             Options options;
@@ -55,5 +66,7 @@ namespace gfsfcgi
 
             Application& getApplication();
             inline mongo::DBClientConnection& getMongoConnection();
+
+            RequestHandler* createRequestHandler() const;
     };
 };

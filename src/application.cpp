@@ -46,3 +46,23 @@ mongo::DBClientConnection& gfsfcgi::Factory::getMongoConnection()
     this->createConnection();
     return *(this->connection);
 }
+
+gfsfcgi::Application::Application(Options options)
+{
+}
+
+gfsfcgi::Application::~Application()
+{
+}
+
+int gfsfcgi::Application::run()
+{
+}
+
+gfsfcgi::ConfigOptions::ConfigOptions(int argc, char** argv)
+{
+}
+
+RequestHandler* gfsfcgi::Factory::createRequestHandler() const
+{
+}

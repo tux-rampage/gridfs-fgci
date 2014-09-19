@@ -27,9 +27,10 @@
 #include <queue>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #include <boost/bind.hpp>
-#include <boost/shared_ptr.hpp>
+//#include <boost/shared_ptr.hpp>
 #include <boost/thread.hpp>
 #include <boost/thread/shared_mutex.hpp>
 
@@ -231,10 +232,10 @@ namespace Fastcgipp
 	private:
 		//! Associative container type for active requests
 		/*!
-		 * This is merely a derivation of a std::map<Protocol::FullId, boost::shared_ptr<T> > and a
+		 * This is merely a derivation of a std::map<Protocol::FullId, std::shared_ptr<T> > and a
 		 * boost::shared_mutex that gives data locking abilities to the STL container.
 		 */
-		class Requests: public std::map<Protocol::FullId, boost::shared_ptr<T> >, public boost::shared_mutex {};
+		class Requests: public std::map<Protocol::FullId, std::shared_ptr<T> >, public boost::shared_mutex {};
 		//! Associative container type for active requests
 		/*!
 		 * This container associated the Protocol::FullId of each active request with a pointer
@@ -271,7 +272,7 @@ template<class T> void Fastcgipp::Manager<T>::push(Protocol::FullId id, Message 
 				reqReadLock.unlock();
 				unique_lock<shared_mutex> reqWriteLock(requests);
 
-				boost::shared_ptr<T>& request = requests[id];
+				std::shared_ptr<T>& request = requests[id];
 				request.reset(new T);
 				request->set(id, transceiver, body.getRole(), !body.getKeepConn(), boost::bind(&Manager::push, boost::ref(*this), id, _1));
 			}
@@ -353,7 +354,7 @@ template<class T> void Fastcgipp::Manager<T>::handler()
 		else
 		{
 			shared_lock<shared_mutex> reqReadLock(requests);
-			typename map<Protocol::FullId, boost::shared_ptr<T> >::iterator it(requests.find(id));
+			typename map<Protocol::FullId, std::shared_ptr<T> >::iterator it(requests.find(id));
 			if(it!=requests.end() && it->second->handler())
 			{
 				reqReadLock.unlock();
