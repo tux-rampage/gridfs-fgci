@@ -71,4 +71,9 @@ namespace gfsfcgi
     {
         GFSFCGI_EXCEPTION_CLASSNAME(RuntimeException);
     };
+
+    class IOException : public AbstractException
+    {
+        GFSFCGI_EXCEPTION_CLASSNAME(IOException);
+    };
 };

@@ -8,6 +8,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#include "exceptions.hpp"
+
+
 /*
  * Listening socket file number
  */
@@ -199,6 +202,50 @@ namespace fastcgi
         		static std::vector<Variable> parseFromContent(char *buffer, size_t size);
         };
 
+        class Message
+        {
+            public:
+                typedef std::map<std::string, std::string> ParamHash;
+
+                /**
+                 * Used for building parameter data
+                 */
+                ParamHash params;
+
+            protected:
+                Header header;
+
+                char* pData;
+                char* buffer;
+
+                size_t size;
+                size_t pos;
+
+                ParamHash::iterator paramPos;
+
+            public:
+                Message(uint16_t id, unsigned char type);
+                ~Message();
+
+                bool empty();
+
+                /**
+                 * Set the data to send
+                 */
+                void setData(char* data, size_t size);
+
+                /**
+                 * Returns the total size of this message
+                 */
+                size_t getSize() const;
+
+                /**
+                 * Put the message data into the given buffer
+                 * The caller must ensure that the buffer can store this->getSize() bytes
+                 */
+                void putData(char* buffer) const;
+        };
+
         /**
          * Http Request
          */
@@ -254,14 +301,20 @@ namespace fastcgi
      */
     class IOHandler
     {
-    	protected:
+    	public:
     		class Client
     		{
+    		    public:
+    		        enum StreamType { STDOUT, STDERR, DATA };
+
     			private:
     				IOHandler& io;
     				int socket;
+
+    				std::mutex socketMutex;
+
     				protocol::Record currentRecord;
-    				unsigned char* buffer;
+
     				size_t headerBytesRead;
     				size_t contentBytesRead;
     				size_t paddingBytesRead;
@@ -285,9 +338,11 @@ namespace fastcgi
     				~Client();
 
     				void onRead(bufferevent *bev, void *arg);
+    				void write(protocol::Request request, StreamType type, const char* data, const size_t& size);
 
     		};
 
+    	protected:
     		std::vector<Client*> clients;
     		std::map<uint16_t, protocol::Request> requests;
 

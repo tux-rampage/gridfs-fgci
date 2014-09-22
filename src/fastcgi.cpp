@@ -51,17 +51,17 @@ namespace fastcgi
 	template<> void IOHandler::Client::prepareRecordSegment<protocol::Header>(protocol::Header& segment) {
 		segment.contentLength = convertFromBigEndian(segment.contentLength);
 		segment.requestId = convertFromBigEndian(segment.contentLength);
-	}
+	};
 
 	template<> void IOHandler::Client::prepareRecordSegment<protocol::BeginRequestBody>(protocol::BeginRequestBody& body)
 	{
 		body.role = convertFromBigEndian(body.role);
-	}
+	};
 
 	template<> void IOHandler::Client::prepareRecordSegment<protocol::EndRequestBody>(protocol::EndRequestBody& segment)
 	{
 		segment.appStatus = convertFromBigEndian(segment.appStatus);
-	}
+	};
 
 	char* IOHandler::Client::extractHeader(char *ptr, size_t &size)
 	{
@@ -92,7 +92,7 @@ namespace fastcgi
 		}
 
 		return ptr;
-	}
+	};
 
 	char* IOHandler::Client::extractContent(char* buffer, size_t& size)
 	{
@@ -132,7 +132,7 @@ namespace fastcgi
 		}
 
 		return buffer;
-	}
+	};
 
 	char* IOHandler::Client::extractPadding(char* buffer, size_t& size)
 	{
@@ -155,7 +155,7 @@ namespace fastcgi
 		}
 
 		return buffer;
-	}
+	};
 
 	void IOHandler::Client::dispatch(bufferevent* bev)
 	{
@@ -181,7 +181,7 @@ namespace fastcgi
 		}
 
 		// TODO: Implement request dispatch
-	}
+	};
 
 	/**
 	 * Read data from socket
@@ -216,7 +216,7 @@ namespace fastcgi
 			}
 		}
 
-	}
+	};
 
 	size_t protocol::Variable::putSize(char *buffer, const size_t& size) const
 	{
@@ -231,7 +231,7 @@ namespace fastcgi
 		memcpy(buffer, &v, sizeof(unsigned char));
 
 		return sizeof(unsigned char);
-	}
+	};
 
 	size_t protocol::Variable::getSize() const
 	{
@@ -243,7 +243,7 @@ namespace fastcgi
 		size += (valueSize > MAX_BYTE_SIZE)? 4 : 1;
 
 		return size;
-	}
+	};
 
 	void protocol::Variable::putData(char* buffer) const
 	{
@@ -258,5 +258,101 @@ namespace fastcgi
 		buffer += nameSize;
 
 		memcpy(buffer, this->_value.c_str(), valueSize);
-	}
+	};
+
+	protocol::Message::Message(uint16_t id, unsigned char type) : buffer(NULL), size(0), pos(0), pData(NULL)
+	{
+	    this->header.requestId = id;
+	    this->header.type = type;
+	    this->header.version = FCGI_VERSION_1;
+	    this->header.reserved = 0;
+	    this->header.contentLength = 0;
+	    this->header.paddingLength = 0;
+	};
+
+	protocol::Message::~Message()
+    {
+    };
+
+    void protocol::Message::setData(char* data, size_t size)
+    {
+        this->size = (size <= protocol::MAX_INT16_SIZE)? size : protocol::MAX_INT16_SIZE;
+        this->buffer = data;
+    };
+
+    bool protocol::Message::empty()
+    {
+        return (this->pos >= this->size);
+    };
+
+    size_t protocol::Message::getSize() const
+    {
+        if (this->header.type == FCGI_GET_VALUES_RESULT) {
+            // TODO
+        } else {
+            this->header.contentLength = this->size;
+            this->header.paddingLength = this->header.contentLength % 8;
+        }
+
+        return sizeof(this->header) + this->header.contentLength + this->header.paddingLength;
+    };
+
+    /**
+     * Put message data into protocol
+     */
+    void protocol::Message::putData(char* buffer) const
+    {
+        if (this->header.type == FCGI_GET_VALUES_RESULT) {
+            // TODO
+        }
+
+        if (this->empty()) {
+            throw gfsfcgi::IOException("End of message data");
+        }
+
+        memcpy(buffer, &this->header, sizeof(this->header));
+        buffer += sizeof(this->header);
+
+        memcpy(buffer, this->pData, dynamic_cast<size_t>(this->header.contentLength));
+        buffer += this->header.contentLength;
+
+        memset(buffer, 0, dynamic_cast<size_t>(this->header.paddingLength));
+    };
+
+	/**
+	 * Write chunk implementation
+	 */
+    void IOHandler::Client::write(protocol::Request request, StreamType type, const char* data, const size_t& size)
+    {
+        while (size) {
+            protocol::Header header;
+            header.requestId = request.getId();
+            header.reserved = 0;
+            header.version = FCGI_VERSION_1;
+
+            if (size <= protocol::MAX_INT16_SIZE) {
+                header.contentLength = size;
+                size = 0;
+            } else {
+                header.contentLength = protocol::MAX_INT16_SIZE;
+                size -= header.contentLength;
+            }
+
+            header.paddingLength = header.contentLength % 8;
+
+            switch (type) {
+                case StreamType::STDOUT:
+                    header.type = FCGI_STDOUT;
+                    break;
+
+                case StreamType::STDERR:
+                    header.type = FCGI_STDERR;
+                    break;
+
+                default:
+                    header.type = FCGI_DATA;
+                    break;
+            }
+        }
+    };
 }
