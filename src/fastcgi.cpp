@@ -3,39 +3,64 @@
 
 namespace fastcgi
 {
-	template<> uint16_t convertBigEndian<uint16_t> (uint16_t value);
-	template<> uint32_t convertBigEndian<uint32_t> (uint32_t value);
-	template<typename T> T convertBigEndian(T value)
+    template<typename T> T convertToBigEndian(T value);
+    template<typename T> T convertFromBigEndian(T value);
+
+    void swapBytes(char* from, char* to, size_t size)
+    {
+        char* pValue = from - 1;
+        char* pValueEnd = pValue + size;
+        char* pResult = to + size;
+
+        while(pValue != pValueEnd) {
+            *--pResult = *++pValue;
+        }
+    };
+
+	template<> uint16_t convertFromBigEndian<uint16_t> (uint16_t value);
+	template<> uint32_t convertFromBigEndian<uint32_t> (uint32_t value);
+	template<typename T> T convertFromBigEndian(T value)
 	{
 		#if __BYTE_ORDER == __LITTLE_ENDIAN
 			T result;
-			char* pValue = (char*)&value - 1;
-			char* pValueEnd = pValue + sizeof(T);
-			char* pResult = (char*)&result + sizeof(T);
-
-			while(pValue != pValueEnd) {
-				*--pResult = *++pValue;
-			}
-
+			char *ptr = (char*)&result;
+			swapBytes((char*)&value, ptr, sizeof(T));
+			*ptr = *ptr & 0x7f;
 			return result;
 		#elif __BYTE_ORDER == __BIG_ENDIAN
 			return value;
 		#endif
-	}
+	};
+
+    template<> uint16_t convertToBigEndian<uint16_t> (uint16_t value);
+    template<> uint32_t convertToBigEndian<uint32_t> (uint32_t value);
+    template<typename T> T convertToBigEndian(T value)
+    {
+        #if __BYTE_ORDER == __LITTLE_ENDIAN
+            T result;
+            char *ptr = (char*)&result;
+            swapBytes((char*)&value, ptr, sizeof(T));
+            *ptr = *ptr | 0x80;
+
+            return result;
+        #elif __BYTE_ORDER == __BIG_ENDIAN
+            return value;
+        #endif
+    };
 
 	template<> void IOHandler::Client::prepareRecordSegment<protocol::Header>(protocol::Header& segment) {
-		segment.contentLength = convertBigEndian(segment.contentLength);
-		segment.requestId = convertBigEndian(segment.contentLength);
+		segment.contentLength = convertFromBigEndian(segment.contentLength);
+		segment.requestId = convertFromBigEndian(segment.contentLength);
 	}
 
 	template<> void IOHandler::Client::prepareRecordSegment<protocol::BeginRequestBody>(protocol::BeginRequestBody& body)
 	{
-		body.role = convertBigEndian(body.role);
+		body.role = convertFromBigEndian(body.role);
 	}
 
 	template<> void IOHandler::Client::prepareRecordSegment<protocol::EndRequestBody>(protocol::EndRequestBody& segment)
 	{
-		segment.appStatus = convertBigEndian(segment.appStatus);
+		segment.appStatus = convertFromBigEndian(segment.appStatus);
 	}
 
 	char* IOHandler::Client::extractHeader(char *ptr, size_t &size)
@@ -195,9 +220,9 @@ namespace fastcgi
 
 	size_t protocol::Variable::putSize(char *buffer, const size_t& size) const
 	{
-		if (size > 127) {
-			uint32_t s = convertBigEndian(dynamic_cast<uint32_t>(size));
-			memcpy(buffer, &s, sizeof(uint32_t));
+		if (size > MAX_BYTE_SIZE) {
+			uint32_t s = convertFromBigEndian(dynamic_cast<uint32_t>(size));
+			memcpy(buffer, &s, sizeof(int32_t));
 
 			return sizeof(uint32_t);
 		}
@@ -214,8 +239,8 @@ namespace fastcgi
 		size_t valueSize = this->getValueSize();
 		size_t size = nameSize + valueSize;
 
-		size += (nameSize > 127)? 4 : 1;
-		size += (valueSize > 127)? 4 : 1;
+		size += (nameSize > MAX_BYTE_SIZE)? 4 : 1;
+		size += (valueSize > MAX_BYTE_SIZE)? 4 : 1;
 
 		return size;
 	}

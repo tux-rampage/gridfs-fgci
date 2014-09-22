@@ -84,6 +84,10 @@ namespace fastcgi
      * Low level protocol
      */
     namespace protocol {
+        const uint32_t MAX_INT32_SIZE = 0x7fffffff;
+        const uint32_t MAX_INT16_SIZE = 0x7fff;
+        const uint32_t MAX_BYTE_SIZE = 0x7f;
+
         struct Header {
             unsigned char version;
             unsigned char type;
@@ -139,6 +143,7 @@ namespace fastcgi
         		std::string _value;
 
         		size_t putSize(char *buffer, const size_t& size) const;
+        		uint32_t readSize(char *buffer, size_t& readSize) const;
 
         	public:
         		inline Variable(const std::string name, const std::string value) : _name(name), _value(value) {};
@@ -175,6 +180,9 @@ namespace fastcgi
         			return this->_name.size();
         		}
 
+        		/**
+        		 * Returns the total binary size in the protocol data
+        		 */
         		size_t getSize() const;
 
         		/**
@@ -184,6 +192,11 @@ namespace fastcgi
         		 * store this->getSize() bytes
         		 */
         		void putData(char* buffer) const;
+
+        		/**
+        		 * Parse content
+        		 */
+        		static std::vector<Variable> parseFromContent(char *buffer, size_t size);
         };
 
         /**
