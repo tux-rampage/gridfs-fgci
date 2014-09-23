@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <stdexcept>
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
@@ -8,7 +9,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#include "exceptions.hpp"
+#include "fcgistream.hpp"
 
 
 /*
@@ -82,8 +83,10 @@
 namespace fastcgi
 {
 	class IOHandler;
+	class IOException : public std::runtime_error {};
+	class IOSegmentViolationException : public std::runtime_error {};
 
-    /**
+	/**
      * Low level protocol
      */
     namespace protocol {
@@ -139,6 +142,9 @@ namespace fastcgi
             UnknownTypeBody body;
         };
 
+        /**
+         * FastCGI protocol variable parsing
+         */
         class Variable
         {
         	private:
@@ -199,7 +205,7 @@ namespace fastcgi
         		/**
         		 * Parse content
         		 */
-        		static std::vector<Variable> parseFromContent(char *buffer, size_t size);
+        		static std::vector<Variable> parseFromStream(std::istream in);
         };
 
         class Message
@@ -251,8 +257,6 @@ namespace fastcgi
          */
         class Request
         {
-			friend ::fastcgi::IOHandler;
-
         	public:
         		enum HTTPMethod { GET, SET, PUT, POST, DELETE };
         		enum Role { Responder, Authenticator };
@@ -262,10 +266,12 @@ namespace fastcgi
         		std::map<std::string, std::string> params;
         		Role role;
 
+        		Client* client;
+
         		void processIncommingRecord(const Record& record);
 
         	public:
-        		Request();
+        		Request(IOHandler io, Client client);
         		~Request();
 
         		/**
@@ -296,52 +302,52 @@ namespace fastcgi
             void handle();
     };
 
+    class Client
+    {
+        public:
+            enum StreamType { STDOUT, STDERR, DATA };
+
+        private:
+            IOHandler& io;
+            int socket;
+
+            std::mutex socketMutex;
+
+            protocol::Record currentRecord;
+
+            size_t headerBytesRead;
+            size_t contentBytesRead;
+            size_t paddingBytesRead;
+
+            bool headerReady;
+            bool contentReady;
+            bool paddingReady;
+
+            evbuffer *outputBuffer;
+
+            template<class T> void prepareInRecordSegment(T& segment);
+            template<class T> void prepareOutRecordSegment(T& segment);
+
+            char* extractHeader(char* buffer, size_t& size);
+            char* extractContent(char* buffer, size_t& size);
+            char* extractPadding(char* buffer, size_t& size);
+
+            void dispatch(bufferevent* bev);
+
+        public:
+            Client(IOHandler& io, int socket);
+            ~Client();
+
+            void onRead(bufferevent *bev, void *arg);
+            void write(protocol::Request request, StreamType type, const char* data, const size_t& size);
+
+    };
+
     /**
      * Handles FastCGI I/O
      */
     class IOHandler
     {
-    	public:
-    		class Client
-    		{
-    		    public:
-    		        enum StreamType { STDOUT, STDERR, DATA };
-
-    			private:
-    				IOHandler& io;
-    				int socket;
-
-    				std::mutex socketMutex;
-
-    				protocol::Record currentRecord;
-
-    				size_t headerBytesRead;
-    				size_t contentBytesRead;
-    				size_t paddingBytesRead;
-
-    				bool headerReady;
-    				bool contentReady;
-    				bool paddingReady;
-
-    				evbuffer *outputBuffer;
-
-    				template<class T> void prepareRecordSegment(T& segment);
-
-    				char* extractHeader(char* buffer, size_t& size);
-    				char* extractContent(char* buffer, size_t& size);
-    				char* extractPadding(char* buffer, size_t& size);
-
-    				void dispatch(bufferevent* bev);
-
-    			public:
-    				Client(IOHandler& io, int socket);
-    				~Client();
-
-    				void onRead(bufferevent *bev, void *arg);
-    				void write(protocol::Request request, StreamType type, const char* data, const size_t& size);
-
-    		};
-
     	protected:
     		std::vector<Client*> clients;
     		std::map<uint16_t, protocol::Request> requests;

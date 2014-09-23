@@ -48,22 +48,48 @@ namespace fastcgi
         #endif
     };
 
-	template<> void IOHandler::Client::prepareRecordSegment<protocol::Header>(protocol::Header& segment) {
+    /////////////////////////////////////////////////////////////////
+    // Incomming record preparation (possible big endian conversion)
+    //
+	template<> void Client::prepareInRecordSegment<protocol::Header>(protocol::Header& segment) {
 		segment.contentLength = convertFromBigEndian(segment.contentLength);
 		segment.requestId = convertFromBigEndian(segment.contentLength);
 	};
 
-	template<> void IOHandler::Client::prepareRecordSegment<protocol::BeginRequestBody>(protocol::BeginRequestBody& body)
+	template<> void Client::prepareInRecordSegment<protocol::BeginRequestBody>(protocol::BeginRequestBody& body)
 	{
 		body.role = convertFromBigEndian(body.role);
 	};
 
-	template<> void IOHandler::Client::prepareRecordSegment<protocol::EndRequestBody>(protocol::EndRequestBody& segment)
+	template<> void Client::prepareInRecordSegment<protocol::EndRequestBody>(protocol::EndRequestBody& segment)
 	{
 		segment.appStatus = convertFromBigEndian(segment.appStatus);
 	};
 
-	char* IOHandler::Client::extractHeader(char *ptr, size_t &size)
+
+    /////////////////////////////////////////////////////////////////
+    // Outgoing record preparation (possible big endian conversion)
+    //
+
+    template<> void Client::prepareOutRecordSegment<protocol::Header>(protocol::Header& segment) {
+        segment.contentLength = convertToBigEndian(segment.contentLength);
+        segment.requestId = convertToBigEndian(segment.contentLength);
+    };
+
+    template<> void Client::prepareOutRecordSegment<protocol::BeginRequestBody>(protocol::BeginRequestBody& body)
+    {
+        body.role = convertToBigEndian(body.role);
+    };
+
+    template<> void Client::prepareOutRecordSegment<protocol::EndRequestBody>(protocol::EndRequestBody& segment)
+    {
+        segment.appStatus = convertToBigEndian(segment.appStatus);
+    };
+
+    /**
+     * Header extraction from data pointer
+     */
+	char* Client::extractHeader(char *ptr, size_t &size)
 	{
 		if (this->headerReady) {
 			return ptr;
@@ -94,7 +120,10 @@ namespace fastcgi
 		return ptr;
 	};
 
-	char* IOHandler::Client::extractContent(char* buffer, size_t& size)
+	/**
+	 * Content extraction from data pointer
+	 */
+	char* Client::extractContent(char* buffer, size_t& size)
 	{
 		if (!this->headerReady || (size <= 0)) {
 			return buffer;
@@ -134,7 +163,10 @@ namespace fastcgi
 		return buffer;
 	};
 
-	char* IOHandler::Client::extractPadding(char* buffer, size_t& size)
+	/**
+	 * Padding extraction from header
+	 */
+	char* Client::extractPadding(char* buffer, size_t& size)
 	{
 		if (!this->headerReady || !this->contentReady || (size <= 0)) {
 			return buffer;
@@ -157,7 +189,7 @@ namespace fastcgi
 		return buffer;
 	};
 
-	void IOHandler::Client::dispatch(bufferevent* bev)
+	void Client::dispatch(bufferevent* bev)
 	{
 		if (this->currentRecord.header.type == FCGI_GET_VALUES) {
 			protocol::Header header;
@@ -186,7 +218,7 @@ namespace fastcgi
 	/**
 	 * Read data from socket
 	 */
-	void IOHandler::Client::onRead(bufferevent* bev, void* arg)
+	void Client::onRead(bufferevent* bev, void* arg)
 	{
 		auto input = bufferevent_get_input(bev);
 		char buffer[1024];
@@ -322,7 +354,7 @@ namespace fastcgi
 	/**
 	 * Write chunk implementation
 	 */
-    void IOHandler::Client::write(protocol::Request request, StreamType type, const char* data, const size_t& size)
+    void Client::write(protocol::Request request, StreamType type, const char* data, const size_t& size)
     {
         while (size) {
             protocol::Header header;
