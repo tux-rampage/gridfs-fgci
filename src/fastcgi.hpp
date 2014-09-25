@@ -10,71 +10,7 @@
 #include <sys/un.h>
 
 #include "fcgistream.hpp"
-
-
-/*
- * Listening socket file number
- */
-#define FCGI_LISTENSOCK_FILENO 0
-
-/*
- * Number of bytes in a FCGI_Header.  Future versions of the protocol
- * will not reduce this number.
- */
-#define FCGI_HEADER_LEN  8
-
-/*
- * Value for version component of FCGI_Header
- */
-#define FCGI_VERSION_1           1
-
-/*
- * Values for type component of FCGI_Header
- */
-#define FCGI_BEGIN_REQUEST       1
-#define FCGI_ABORT_REQUEST       2
-#define FCGI_END_REQUEST         3
-#define FCGI_PARAMS              4
-#define FCGI_STDIN               5
-#define FCGI_STDOUT              6
-#define FCGI_STDERR              7
-#define FCGI_DATA                8
-#define FCGI_GET_VALUES          9
-#define FCGI_GET_VALUES_RESULT  10
-#define FCGI_UNKNOWN_TYPE       11
-#define FCGI_MAXTYPE (FCGI_UNKNOWN_TYPE)
-
-/*
- * Value for requestId component of FCGI_Header
- */
-#define FCGI_NULL_REQUEST_ID     0
-
-/*
- * Mask for flags component of FCGI_BeginRequestBody
- */
-#define FCGI_KEEP_CONN  1
-
-/*
- * Values for role component of FCGI_BeginRequestBody
- */
-#define FCGI_RESPONDER  1
-#define FCGI_AUTHORIZER 2
-#define FCGI_FILTER     3
-
-/*
- * Values for protocolStatus component of FCGI_EndRequestBody
- */
-#define FCGI_REQUEST_COMPLETE 0
-#define FCGI_CANT_MPX_CONN    1
-#define FCGI_OVERLOADED       2
-#define FCGI_UNKNOWN_ROLE     3
-
-/*
- * Variable names for FCGI_GET_VALUES / FCGI_GET_VALUES_RESULT records
- */
-#define FCGI_MAX_CONNS  "FCGI_MAX_CONNS"
-#define FCGI_MAX_REQS   "FCGI_MAX_REQS"
-#define FCGI_MPXS_CONNS "FCGI_MPXS_CONNS"
+#include "fastcgi_constants.hpp"
 
 
 /**
@@ -211,34 +147,31 @@ namespace fastcgi
         class Message
         {
             public:
-                typedef std::map<std::string, std::string> ParamHash;
+                Message(uint16_t id, unsigned char type);
+                ~Message();
 
-                /**
-                 * Used for building parameter data
-                 */
-                ParamHash params;
+            private:
+                bool canFreeBuffer;
+                void freeBuffer();
 
             protected:
                 Header header;
 
-                char* pData;
                 char* buffer;
-
                 size_t size;
-                size_t pos;
-
-                ParamHash::iterator paramPos;
 
             public:
-                Message(uint16_t id, unsigned char type);
-                ~Message();
-
+                /**
+                 * Check whether this message is empty
+                 */
                 bool empty();
 
                 /**
                  * Set the data to send
+                 *
+                 * Note: Size must not exceed protocol::MAX_INT16_SIZE
                  */
-                void setData(char* data, size_t size);
+                void setData(const char* data, const size_t& size);
 
                 /**
                  * Returns the total size of this message
@@ -246,10 +179,19 @@ namespace fastcgi
                 size_t getSize() const;
 
                 /**
-                 * Put the message data into the given buffer
-                 * The caller must ensure that the buffer can store this->getSize() bytes
+                 * Returns the padding size
                  */
-                void putData(char* buffer) const;
+                size_t getPaddingSize() const;
+
+                /**
+                 * Short accessor for header.contentLength
+                 */
+                size_t getContentSize() const;
+
+                /**
+                 * Returns the data to send
+                 */
+                const char* getData() const;
         };
 
         /**
@@ -258,21 +200,25 @@ namespace fastcgi
         class Request
         {
         	public:
-        		enum HTTPMethod { GET, SET, PUT, POST, DELETE };
-        		enum Role { Responder, Authenticator };
+        		typedef std::shared_ptr<Client> ClientPtr;
+        		enum class HTTPMethod { GET, SET, PUT, POST, DELETE };
+        		enum class Role : uint16_t { RESPONDER = FCGI_RESPONDER, AUTHORIZER = FCGI_AUTHORIZER };
 
         	protected:
         		uint16_t id;
         		std::map<std::string, std::string> params;
+        		std::map<unsigned char, bool> streamStates;
         		Role role;
 
-        		Client* client;
+        		ClientPtr client;
 
         		void processIncommingRecord(const Record& record);
 
         	public:
-        		Request(IOHandler io, Client client);
+        		Request(const uint16_t& id, ClientPtr client);
         		~Request();
+
+        		void send(protocol::Message& msg);
 
         		/**
         		 * Returns the request id
@@ -286,21 +232,36 @@ namespace fastcgi
         		{
         			return this->role;
         		};
+
+
         };
     };
 
-    class HandlerThread
+    /**
+     * Interface for Handler implementations
+     */
+    class HandlerInterface
+    {
+
+    };
+
+    // Shared pointer to handler interface
+    typedef std::shared_ptr<HandlerInterface> HandlerInterfacePtr;
+
+    /**
+     * Worker queue
+     */
+    class WorkerQueue : protected std::queue<HandlerInterfacePtr>
     {
         protected:
-            std::thread* thread;
-
+            std::mutex protector;
 
         public:
-            HandlerThread();
-            ~HandlerThread();
-
-            void handle();
+            void push(HandlerInterfacePtr& ptr);
+            HandlerInterfacePtr pop();
     };
+
+
 
     class Client
     {
@@ -308,11 +269,10 @@ namespace fastcgi
             enum StreamType { STDOUT, STDERR, DATA };
 
         private:
-            IOHandler& io;
             int socket;
 
+            IOHandler& io;
             std::mutex socketMutex;
-
             protocol::Record currentRecord;
 
             size_t headerBytesRead;
@@ -339,7 +299,7 @@ namespace fastcgi
             ~Client();
 
             void onRead(bufferevent *bev, void *arg);
-            void write(protocol::Request request, StreamType type, const char* data, const size_t& size);
+            void write(protocol::Message& message);
 
     };
 
@@ -349,7 +309,7 @@ namespace fastcgi
     class IOHandler
     {
     	protected:
-    		std::vector<Client*> clients;
+    		std::vector<std::shared_ptr<Client> > clients;
     		std::map<uint16_t, protocol::Request> requests;
 
         public:
@@ -358,5 +318,4 @@ namespace fastcgi
 
             void run();
     };
-};
-
+}

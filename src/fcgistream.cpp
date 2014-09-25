@@ -17,13 +17,19 @@ namespace fastcgi
             this->chunks.clear();
         }
 
-        void InStreamBuffer::addChunk(const char* data, const size_t& size)
+        void InStreamBuffer::addChunk(const protocol::Record& record)
         {
+        	if (record.header.contentLength == 0) {
+        		this->isComplete = true;
+        		return;
+        	}
+
+        	size_t size = record.header.contentLength;
             chunk_t chunk;
             chunk.data = new char[size];
             chunk.size = size;
 
-            memcpy(chunk.data, data, size);
+            memcpy(chunk.data, record.content, size);
             this->chunks.push_back(chunk);
         }
 
@@ -71,8 +77,77 @@ namespace fastcgi
             return pos_type(off_type(-1));
         }
 
+        bool InStreamBuffer::ready() const
+		{
+			return this->isComplete;
+		}
+
+
+        // Output Buffer
+
+        OutStreamBuffer::OutStreamBuffer(protocol::Request& request, const role_t& role, const size_t& chunksize) :
+			request(request),
+			role(role),
+			chunkSize(chunksize)
+        {
+        	this->chunk = new char[this->chunkSize];
+        	this->resetChunk();
+        }
+
+        OutStreamBuffer::~OutStreamBuffer()
+        {
+        	this->setp(NULL, NULL);
+        	delete [] this->chunk;
+
+        	this->chunk = NULL;
+        }
+
+        void OutStreamBuffer::resetChunk()
+        {
+        	memset(this->chunk, 0, this->chunkSize);
+        	this->setp(this->chunk, this->chunk + this->chunkSize);
+        }
+
+        std::streambuf::int_type OutStreamBuffer::overflow(int_type ch)
+        {
+        	if (this->sync() != 0) {
+        		this->setp(NULL, NULL);
+        		return traits_type::eof();
+        	}
+
+        	if (ch != traits_type::eof()) {
+        		*this->chunk = (char)ch;
+        	}
+
+        	return 1;
+        }
+
+        int OutStreamBuffer::sync()
+        {
+        	protocol::Message msg(this->request.getId(), this->role);
+
+        	msg.setData(this->chunk, this->chunkSize);
+        	this->request.send(msg);
+        	this->resetChunk();
+
+        	return 0;
+        }
+
+
+        // Stream Impl
+
         InStream::InStream(protocol::Request& request) : _b(request), std::istream(&_b)
         {}
+
+        bool InStream::isReady() const
+        {
+        	InStreamBuffer* buf = dynamic_cast<InStreamBuffer*>(this->rdbuf());
+        	if (buf == NULL) {
+        		return false;
+        	}
+
+        	return buf->ready();
+        }
     }
 }
 

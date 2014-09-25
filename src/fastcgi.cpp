@@ -48,6 +48,18 @@ namespace fastcgi
         #endif
     };
 
+    /////////////////////////////////////////////////////////////////////////////////////
+    // Client Impl
+    //
+
+	Client::Client(IOHandler& io, int socket)
+	{
+	}
+
+	Client::~Client()
+	{
+	}
+
     /////////////////////////////////////////////////////////////////
     // Incomming record preparation (possible big endian conversion)
     //
@@ -65,6 +77,10 @@ namespace fastcgi
 	{
 		segment.appStatus = convertFromBigEndian(segment.appStatus);
 	};
+
+	template<class T> void Client::prepareInRecordSegment(T& segment)
+	{
+	}
 
 
     /////////////////////////////////////////////////////////////////
@@ -85,6 +101,11 @@ namespace fastcgi
     {
         segment.appStatus = convertToBigEndian(segment.appStatus);
     };
+
+	template<class T> void Client::prepareOutRecordSegment(T& segment)
+	{
+	}
+
 
     /**
      * Header extraction from data pointer
@@ -247,144 +268,183 @@ namespace fastcgi
 				}
 			}
 		}
-
 	};
 
-	size_t protocol::Variable::putSize(char *buffer, const size_t& size) const
-	{
-		if (size > MAX_BYTE_SIZE) {
-			uint32_t s = convertFromBigEndian(dynamic_cast<uint32_t>(size));
-			memcpy(buffer, &s, sizeof(int32_t));
-
-			return sizeof(uint32_t);
-		}
-
-		unsigned char v = dynamic_cast<unsigned char>(size);
-		memcpy(buffer, &v, sizeof(unsigned char));
-
-		return sizeof(unsigned char);
-	};
-
-	size_t protocol::Variable::getSize() const
-	{
-		size_t nameSize = this->getNameSize();
-		size_t valueSize = this->getValueSize();
-		size_t size = nameSize + valueSize;
-
-		size += (nameSize > MAX_BYTE_SIZE)? 4 : 1;
-		size += (valueSize > MAX_BYTE_SIZE)? 4 : 1;
-
-		return size;
-	};
-
-	void protocol::Variable::putData(char* buffer) const
-	{
-		size_t nameSize = this->getNameSize();
-		size_t valueSize = this->getValueSize();
-		size_t size = this->getSize();
-
-		buffer += this->putSize(buffer, nameSize);
-		buffer += this->putSize(buffer, valueSize);
-
-		memcpy(buffer, this->_name.c_str(), nameSize);
-		buffer += nameSize;
-
-		memcpy(buffer, this->_value.c_str(), valueSize);
-	};
-
-	protocol::Message::Message(uint16_t id, unsigned char type) : buffer(NULL), size(0), pos(0), pData(NULL)
-	{
-	    this->header.requestId = id;
-	    this->header.type = type;
-	    this->header.version = FCGI_VERSION_1;
-	    this->header.reserved = 0;
-	    this->header.contentLength = 0;
-	    this->header.paddingLength = 0;
-	};
-
-	protocol::Message::~Message()
-    {
-    };
-
-    void protocol::Message::setData(char* data, size_t size)
-    {
-        this->size = (size <= protocol::MAX_INT16_SIZE)? size : protocol::MAX_INT16_SIZE;
-        this->buffer = data;
-    };
-
-    bool protocol::Message::empty()
-    {
-        return (this->pos >= this->size);
-    };
-
-    size_t protocol::Message::getSize() const
-    {
-        if (this->header.type == FCGI_GET_VALUES_RESULT) {
-            // TODO
-        } else {
-            this->header.contentLength = this->size;
-            this->header.paddingLength = this->header.contentLength % 8;
-        }
-
-        return sizeof(this->header) + this->header.contentLength + this->header.paddingLength;
-    };
-
-    /**
-     * Put message data into protocol
-     */
-    void protocol::Message::putData(char* buffer) const
-    {
-        if (this->header.type == FCGI_GET_VALUES_RESULT) {
-            // TODO
-        }
-
-        if (this->empty()) {
-            throw gfsfcgi::IOException("End of message data");
-        }
-
-        memcpy(buffer, &this->header, sizeof(this->header));
-        buffer += sizeof(this->header);
-
-        memcpy(buffer, this->pData, dynamic_cast<size_t>(this->header.contentLength));
-        buffer += this->header.contentLength;
-
-        memset(buffer, 0, dynamic_cast<size_t>(this->header.paddingLength));
-    };
 
 	/**
 	 * Write chunk implementation
 	 */
-    void Client::write(protocol::Request request, StreamType type, const char* data, const size_t& size)
+    void Client::write(protocol::Message &message)
     {
-        while (size) {
-            protocol::Header header;
-            header.requestId = request.getId();
-            header.reserved = 0;
-            header.version = FCGI_VERSION_1;
+    	std::lock_guard guard(this->socketMutex);
 
-            if (size <= protocol::MAX_INT16_SIZE) {
-                header.contentLength = size;
-                size = 0;
-            } else {
-                header.contentLength = protocol::MAX_INT16_SIZE;
-                size -= header.contentLength;
-            }
+    	// TODO Put to buffer
+    	// evbuffer_add(buf, &message.getHeader(), message.getHeaderSize());
 
-            header.paddingLength = header.contentLength % 8;
+    	if (message.getSize()) {
+    		// evbuffer_add(buf, message.getData(), message.getContentSize());
 
-            switch (type) {
-                case StreamType::STDOUT:
-                    header.type = FCGI_STDOUT;
-                    break;
+    		if (message.getPaddingSize()) {
+    			char* padding = new char[message.getPaddingSize()];
+    			memset(padding, 0, message.getPaddingSize());
 
-                case StreamType::STDERR:
-                    header.type = FCGI_STDERR;
-                    break;
+    			// evbuffer_add(buf, padding, message.getPaddingSize());
 
-                default:
-                    header.type = FCGI_DATA;
-                    break;
-            }
-        }
+    			delete [] padding;
+    		}
+    	}
     };
+
+
+	///////////////////////////////////////////////////////////////////////////
+	//
+	// Protocol specific
+	//
+	///////////////////////////////////////////////////////////////////////////
+
+	namespace protocol {
+
+		////////////////////////
+		// Variable Container
+
+		std::vector<Variable> protocol::Variable::parseFromStream(std::istream in)
+		{
+			std::vector<Variable> result;
+			return result;
+		}
+
+		size_t Variable::putSize(char *buffer, const size_t& size) const
+		{
+			if (size > MAX_BYTE_SIZE) {
+				uint32_t s = convertFromBigEndian(dynamic_cast<uint32_t>(size));
+				memcpy(buffer, &s, sizeof(int32_t));
+
+				return sizeof(uint32_t);
+			}
+
+			unsigned char v = dynamic_cast<unsigned char>(size);
+			memcpy(buffer, &v, sizeof(unsigned char));
+
+			return sizeof(unsigned char);
+		};
+
+		size_t Variable::getSize() const
+		{
+			size_t nameSize = this->getNameSize();
+			size_t valueSize = this->getValueSize();
+			size_t size = nameSize + valueSize;
+
+			size += (nameSize > MAX_BYTE_SIZE)? 4 : 1;
+			size += (valueSize > MAX_BYTE_SIZE)? 4 : 1;
+
+			return size;
+		};
+
+		void Variable::putData(char* buffer) const
+		{
+			size_t nameSize = this->getNameSize();
+			size_t valueSize = this->getValueSize();
+			size_t size = this->getSize();
+
+			buffer += this->putSize(buffer, nameSize);
+			buffer += this->putSize(buffer, valueSize);
+
+			memcpy(buffer, this->_name.c_str(), nameSize);
+			buffer += nameSize;
+
+			memcpy(buffer, this->_value.c_str(), valueSize);
+		};
+
+
+		//////////////////////////////////////////////////////////////////
+		// Message impl
+		//
+
+		Message::Message(uint16_t id, unsigned char type) : buffer(NULL), size(0), canFreeBuffer(false)
+		{
+			this->header.requestId = id;
+			this->header.type = type;
+			this->header.version = FCGI_VERSION_1;
+			this->header.reserved = 0;
+			this->header.contentLength = 0;
+			this->header.paddingLength = 0;
+		};
+
+		Message::~Message()
+		{
+			this->freeBuffer();
+		};
+
+		void Message::freeBuffer()
+		{
+			if (this->canFreeBuffer && (this->buffer != NULL)) {
+				delete [] this->buffer;
+				this->buffer = NULL;
+				this->size = 0;
+			}
+		}
+
+		void Message::setData(const char* data, const size_t& size)
+		{
+			if (size <= protocol::MAX_INT16_SIZE) {
+				throw new IOException("Chuck size too large.");
+			}
+
+			this->size = size;
+			this->buffer = data;
+		};
+
+		bool Message::empty()
+		{
+			return (this->size == 0);
+		}
+
+		size_t Message::getPaddingSize() const
+		{
+			size_t mod = this->size % 8;
+			return (mod == 0)? 0 : 8 - mod;
+		}
+
+		size_t Message::getSize() const
+		{
+			return sizeof(this->header) + this->getSize() + this->getPaddingSize();
+		};
+
+		size_t Message::getContentSize() const
+		{
+			return this->size;
+		}
+
+		/**
+		 * Return raw message data
+		 */
+		const char* Message::getData() const
+		{
+			return const_cast<const char*>(this->buffer);
+		};
+
+
+		///////////////////////////////////////////////////
+		// Request Impl
+		//
+
+		void Request::processIncommingRecord(const Record& record)
+		{
+			// TODO
+		}
+
+		Request::Request(const uint16_t& id, ClientPtr client) : client(client), id(id), role(Role::RESPONDER)
+		{
+		}
+
+		protocol::Request::~Request()
+		{
+		}
+
+		void protocol::Request::send(protocol::Message& msg)
+		{
+			this->client->write(msg);
+		}
+
+	}
 }
