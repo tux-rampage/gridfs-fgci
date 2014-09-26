@@ -81,14 +81,23 @@ namespace fastcgi
 				virtual int sync();
 		};
 
-        class InStream : std::istream
+        class InStream : public std::istream
         {
-            protected:
-                InStreamBuffer _b;
-
             public:
                 InStream(protocol::Request& request);
+                virtual ~InStream();
+
+            public:
                 bool isReady() const;
+        };
+
+        class OutStream : public std::ostream
+        {
+        	using OutStreamBuffer::role_t;
+
+        	public:
+        		OutStream(protocol::Request& request, const role_t& role);
+        		~OutStream();
         };
     }
 }

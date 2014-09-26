@@ -136,7 +136,13 @@ namespace fastcgi
 
         // Stream Impl
 
-        InStream::InStream(protocol::Request& request) : _b(request), std::istream(&_b)
+        InStream::InStream(protocol::Request& request)
+        {
+        	std::shared_ptr<InStreamBuffer> b(new InStreamBuffer(request));
+        	std::istream(b);
+        }
+
+        InStream::~InStream()
         {}
 
         bool InStream::isReady() const
@@ -148,6 +154,16 @@ namespace fastcgi
 
         	return buf->ready();
         }
+
+
+        OutStream::OutStream(protocol::Request& request, const role_t& role)
+        {
+        	std::shared_ptr<OutStreamBuffer> b(new OutStreamBuffer(request, role));
+        	std::ostream(b);
+        }
+
+        OutStream::~OutStream()
+        {}
     }
 }
 

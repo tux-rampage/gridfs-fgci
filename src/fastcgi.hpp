@@ -209,7 +209,16 @@ namespace fastcgi
         		std::map<std::string, std::string> params;
         		std::map<unsigned char, bool> streamStates;
         		Role role;
+        		bool valid;
 
+        		// Streams:
+        		streams::InStream _params;
+        		streams::InStream _stdin;
+        		streams::InStream _datain;
+        		streams::OutStream _stdout;
+        		streams::OutStream _stderr;
+
+        		// Client ref
         		ClientPtr client;
 
         		void processIncommingRecord(const Record& record);
@@ -219,6 +228,26 @@ namespace fastcgi
         		~Request();
 
         		void send(protocol::Message& msg);
+
+        		inline streams::InStream& getStdIn()
+        		{
+        			return this->_stdin;
+        		}
+
+        		inline streams::InStream& getDataStream()
+        		{
+        			return this->_datain;
+        		}
+
+        		inline streams::OutStream& getStdOut()
+        		{
+        			return this->_stdout;
+        		}
+
+        		inline streams::OutStream& getStdErr()
+        		{
+        			return this->_stderr;
+        		}
 
         		/**
         		 * Returns the request id

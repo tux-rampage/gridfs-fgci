@@ -430,10 +430,57 @@ namespace fastcgi
 
 		void Request::processIncommingRecord(const Record& record)
 		{
-			// TODO
+			if (!this->valid) {
+				return;
+			}
+
+			switch (record.header.type) {
+				case FCGI_ABORT_REQUEST:
+					this->valid = true;
+					break;
+
+				case FCGI_PARAMS:
+					streams::InStreamBuffer* buf = dynamic_cast<streams::InStreamBuffer*>(this->_params.rdbuf());
+					if (buf == NULL) {
+						break;
+					}
+
+					buf->addChunk(record);
+
+					if (this->_params.isReady()) {
+						// TODO: Parse Params
+					}
+
+					break;
+
+				case FCGI_STDIN: // break intentionally omitted
+				case FCGI_DATA:
+					streams::InStreamBuffer* buf = (record.header.type == FCGI_STDIN)?
+							dynamic_cast<streams::InStreamBuffer*>(this->_stdin.rdbuf()) :
+							dynamic_cast<streams::InStreamBuffer*>(this->_datain.rdbuf());
+
+					if (buf != NULL) {
+						buf->addChunk(record);
+					}
+
+
+					break;
+
+				default:
+					break;
+			}
 		}
 
-		Request::Request(const uint16_t& id, ClientPtr client) : client(client), id(id), role(Role::RESPONDER)
+		Request::Request(const uint16_t& id, ClientPtr client) :
+				client(client),
+				id(id),
+				role(Role::RESPONDER),
+				valid(false),
+				_params(*this),
+				_stdin(*this),
+				_datain(*this),
+				_stdout(*this, streams::OutStreamBuffer::role_t::STDOUT),
+				_stderr(*this, streams::OutStreamBuffer::role_t::STDERR)
 		{
 		}
 
