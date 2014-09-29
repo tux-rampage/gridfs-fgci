@@ -138,11 +138,15 @@ namespace fastcgi
         		 */
         		void putData(char* buffer) const;
 
+        	public:
         		/**
         		 * Parse content
         		 */
-        		static std::vector<Variable> parseFromStream(std::istream in);
+        		static std::vector<Variable> parseFromStream(std::istream& in);
         };
+
+
+        std::istream& operator>>(std::istream& in, Variable& var);
 
         class Message
         {

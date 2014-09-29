@@ -307,9 +307,91 @@ namespace fastcgi
 		////////////////////////
 		// Variable Container
 
-		std::vector<Variable> protocol::Variable::parseFromStream(std::istream in)
+		int32_t readSizeFromStream(std::istream& in)
+		{
+			if (!in.good()) {
+				throw std::runtime_error("Failed to read variable size");
+			}
+
+			char s;
+			uint32_t size = 0;
+
+			in >> s;
+
+			if (!in.good()) {
+				throw std::runtime_error("Failed to read variable size");
+			}
+
+			if (s >> 7) { // High value bit
+				char *sbuf = new char[3];
+				char* p = (char*)&size;
+
+				in.get(sbuf, 3);
+
+				if (!in.good()) {
+					delete [] sbuf;
+					throw std::runtime_error("Failed to read variable size");
+				}
+
+				memcpy(p++, &s, 1);
+				memcpy(p, sbuf, 3);
+
+				delete [] sbuf;
+				size = convertFromBigEndian(size);
+			} else {
+				size = (uint32_t)s;
+			}
+
+			return size;
+		}
+
+		/**
+		 * Read var from stream operator
+		 */
+		std::istream& operator>>(std::istream& in, Variable& var)
+		{
+			uint32_t nameSize = readSizeFromStream(in);
+			uint32_t valueSize = readSizeFromStream(in);
+
+			bool  good = false;
+			char* name = new char[nameSize + 1];
+			char* value = new char[valueSize + 1];
+
+			in.read(name, nameSize);
+			if (in.good()) {
+				in.read(value, valueSize);
+
+				if (valueSize != in.gcount()) {
+					delete [] name;
+					delete [] value;
+
+					throw std::runtime_error("Failed to read variable data from fcgi stream");
+				}
+			}
+
+			var.name(std::string(name));
+			var.value(std::string(value));
+
+			delete [] name;
+			delete [] value;
+
+			return in;
+		}
+
+		std::vector<Variable> protocol::Variable::parseFromStream(std::istream& in)
 		{
 			std::vector<Variable> result;
+
+			while (in.good()) {
+				try {
+					Variable v;
+					in >> v;
+
+					result.push_back(v);
+				} catch (std::runtime_error& e) {
+				}
+			}
+
 			return result;
 		}
 
