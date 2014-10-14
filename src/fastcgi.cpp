@@ -295,6 +295,26 @@ namespace fastcgi
     	}
     };
 
+	void Client::write(const protocol::EndRequestRecord& msg)
+	{
+		std::lock_guard guard(this->socketMutex);
+		protocol::EndRequestRecord r = msg;
+
+		r.header.paddingLength = 0;
+		r.header.contentLength = sizeof(r.body);
+		r.header.version = FCGI_VERSION_1;
+		r.header.type = FCGI_END_REQUEST;
+
+
+		// Convert endians
+		r.header.contentLength = convertToBigEndian(r.header.contentLength);
+		r.header.requestId = convertToBigEndian(r.header.requestId);
+		r.body.appStatus = convertToBigEndian(r.body.appStatus);
+
+		// FIXME: Add to buffer
+		// evbuffer_add(buf, &message.getHeader(), message.getHeaderSize());
+	}
+
 
 	///////////////////////////////////////////////////////////////////////////
 	//
@@ -398,7 +418,7 @@ namespace fastcgi
 		size_t Variable::putSize(char *buffer, const size_t& size) const
 		{
 			if (size > MAX_BYTE_SIZE) {
-				uint32_t s = convertFromBigEndian(dynamic_cast<uint32_t>(size));
+				uint32_t s = convertToBigEndian(dynamic_cast<uint32_t>(size));
 				memcpy(buffer, &s, sizeof(int32_t));
 
 				return sizeof(uint32_t);
@@ -530,7 +550,13 @@ namespace fastcgi
 					buf->addChunk(record);
 
 					if (this->_params.isReady()) {
-						// TODO: Parse Params
+						for (auto p : Variable::parseFromStream(this->_params)) {
+							this->params[p.name()] = p.value();
+						}
+
+						if (this->role != Role::FILTER) {
+							this->ready = true;
+						}
 					}
 
 					break;
@@ -558,6 +584,7 @@ namespace fastcgi
 				id(id),
 				role(Role::RESPONDER),
 				valid(false),
+				ready(false),
 				_params(*this),
 				_stdin(*this),
 				_datain(*this),
@@ -566,13 +593,24 @@ namespace fastcgi
 		{
 		}
 
-		protocol::Request::~Request()
+		Request::~Request()
 		{
 		}
 
-		void protocol::Request::send(protocol::Message& msg)
+		void Request::send(protocol::Message& msg)
 		{
 			this->client->write(msg);
+		}
+
+		void Request::abort(uint32_t status)
+		{
+			EndRequestRecord end;
+			end.header.requestId = this->getId();
+			end.body.appStatus = status;
+			end.body.protocolStatus = 0;
+
+			this->valid = false;
+			this->client->write(end);
 		}
 
 	}

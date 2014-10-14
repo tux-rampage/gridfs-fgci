@@ -206,7 +206,7 @@ namespace fastcgi
         	public:
         		typedef std::shared_ptr<Client> ClientPtr;
         		enum class HTTPMethod { GET, SET, PUT, POST, DELETE };
-        		enum class Role : uint16_t { RESPONDER = FCGI_RESPONDER, AUTHORIZER = FCGI_AUTHORIZER };
+        		enum class Role : uint16_t { RESPONDER = FCGI_RESPONDER, AUTHORIZER = FCGI_AUTHORIZER, FILTER = FCGI_FILTER };
 
         	protected:
         		uint16_t id;
@@ -214,6 +214,7 @@ namespace fastcgi
         		std::map<unsigned char, bool> streamStates;
         		Role role;
         		bool valid;
+        		bool ready;
 
         		// Streams:
         		streams::InStream _params;
@@ -232,6 +233,7 @@ namespace fastcgi
         		~Request();
 
         		void send(protocol::Message& msg);
+        		void abort(uint32_t status);
 
         		inline streams::InStream& getStdIn()
         		{
@@ -333,6 +335,7 @@ namespace fastcgi
 
             void onRead(bufferevent *bev, void *arg);
             void write(protocol::Message& message);
+            void write(const protocol::EndRequestRecord& msg);
 
     };
 
