@@ -76,7 +76,7 @@ namespace fastcgi
                     continue;
                 }
 
-                size_t offset = off - (current - this->current->size);
+                size_t offset = (size_t)off - ((size_t)current - (size_t)this->current->size);
                 char* pOffset = this->current->data + offset;
                 this->setg(this->current->data, pOffset, this->current->data + this->current->size);
 
@@ -146,7 +146,7 @@ namespace fastcgi
                 return -1;
             }
 
-            protocol::GenericMessage msg(this->requestId, this->role, this->chunk, this->chunkSize);
+            protocol::GenericMessage msg(this->requestId, (unsigned char)this->role, this->chunk, this->chunkSize);
             this->client->write(msg);
             this->resetChunk();
 
@@ -161,7 +161,7 @@ namespace fastcgi
             this->sync();
 
             // Send EOF
-            protocol::GenericMessage msg(this->requestId, this->role, NULL, 0);
+            protocol::GenericMessage msg(this->requestId, (unsigned char)this->role, NULL, 0);
             this->client->write(msg);
 
             ClosableStreamBuffer::close();
@@ -172,8 +172,8 @@ namespace fastcgi
 
         InStream::InStream(Request& request)
         {
-            std::shared_ptr<InStreamBuffer> b(new InStreamBuffer(request));
-            std::istream(b);
+            // TODO: Memory
+            std::istream(new InStreamBuffer(request));
         }
 
         InStream::~InStream()
@@ -199,16 +199,16 @@ namespace fastcgi
         }
 
 
-        OutStream::OutStream(ClientPtr client, uint16_t requestId, const role_t& role)
+        OutStream::OutStream(ClientPtr client, uint16_t requestId, const OutStreamBuffer::role_t& role)
         {
-            std::shared_ptr<OutStreamBuffer> b(new OutStreamBuffer(client, requestId, role));
-            std::ostream(b);
+            // FIXME: Memory
+            std::ostream(new OutStreamBuffer(client, requestId, role));
         }
 
         OutStream::OutStream(Request& request, const role_t& role)
         {
-            std::shared_ptr<OutStreamBuffer> b(new OutStreamBuffer(request, role));
-            std::ostream(b);
+            // FIXME: Memory
+            std::ostream(new OutStreamBuffer(request, role));
         }
 
         OutStream::~OutStream()

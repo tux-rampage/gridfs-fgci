@@ -3,6 +3,8 @@
 #include <regex>
 #include <sstream>
 
+#include <unistd.h>
+
 #include "fastcgi.hpp"
 
 /**
@@ -76,40 +78,40 @@ namespace fastcgi
      */
     typedef std::function<void(bufferevent*, short)> GenericEventCallback;
 
-    /**
-     * callback function for libevent where arg should be a pointer to a BufferEventCallback
-     *
-     * @param[in]  event  Pointer to the libevent struct
-     * @param[in]  arg    This should be a pointer to an BufferEventCallback
-     */
-    void libevent_bind_rw_callback(bufferevent* event, void* arg)
-    {
-        BufferEventCallback* cb = dynamic_cast<BufferEventCallback*>(arg);
-
-        if (cb != NULL) {
-            (*cb)(event);
-        } else {
-            std::cerr << "Bad buffer r/w event callback in arg " << arg << "!" << std::endl;
-        }
-    }
-
-    /**
-     * Called by libevent when an event on the underlying socket occours.
-     *
-     * @param[in]  event  Pointer to the libevent struct
-     * @param[in]  events Event codes
-     * @param[in]  arg    This should be a pointer to an ErrorEventCallback
-     */
-    void libevent_bind_error_callback(bufferevent* event, short events, void *arg)
-    {
-        GenericEventCallback* cb = dynamic_cast<GenericEventCallback*>(arg);
-
-        if (cb != NULL) {
-            (*cb)(event, events);
-        } else {
-            std::cerr << "Bad generic event callback in arg " << arg << "!" << std::endl;
-        }
-    }
+//    /**
+//     * callback function for libevent where arg should be a pointer to a BufferEventCallback
+//     *
+//     * @param[in]  event  Pointer to the libevent struct
+//     * @param[in]  arg    This should be a pointer to an BufferEventCallback
+//     */
+//    void libevent_bind_rw_callback(bufferevent* event, void* arg)
+//    {
+//        BufferEventCallback* cb = dynamic_cast<BufferEventCallback*>(arg);
+//
+//        if (cb != NULL) {
+//            (*cb)(event);
+//        } else {
+//            std::cerr << "Bad buffer r/w event callback in arg " << arg << "!" << std::endl;
+//        }
+//    }
+//
+//    /**
+//     * Called by libevent when an event on the underlying socket occours.
+//     *
+//     * @param[in]  event  Pointer to the libevent struct
+//     * @param[in]  events Event codes
+//     * @param[in]  arg    This should be a pointer to an ErrorEventCallback
+//     */
+//    void libevent_bind_error_callback(bufferevent* event, short events, void *arg)
+//    {
+//        GenericEventCallback* cb = dynamic_cast<GenericEventCallback*>(arg);
+//
+//        if (cb != NULL) {
+//            (*cb)(event, events);
+//        } else {
+//            std::cerr << "Bad generic event callback in arg " << arg << "!" << std::endl;
+//        }
+//    }
 
 
 
@@ -197,8 +199,8 @@ namespace fastcgi
 
     template<> void Client::prepareOutRecordSegment<protocol::EndRequestRecord>(protocol::EndRequestRecord& segment)
     {
-        this->prepareOutRecordSegment(segment.header);
-        this->prepareOutRecordSegment(segment.body);
+        prepareOutRecordSegment(segment.header);
+        prepareOutRecordSegment(segment.body);
     }
 
     template<class T> void Client::prepareOutRecordSegment(T& segment)
@@ -312,7 +314,7 @@ namespace fastcgi
     void Client::dispatch()
     {
         if (this->currentRecord.header.type == FCGI_GET_VALUES) {
-            streams::OutStream s(this, FCGI_NULL_REQUEST_ID, streams::OutStreamBuffer::role_t::VALUES_RESULT);
+            streams::OutStream s(ClientPtr(this), FCGI_NULL_REQUEST_ID, streams::OutStreamBuffer::role_t::VALUES_RESULT);
 
             protocol::Variable _var(FCGI_MPXS_CONNS, "1");
             s << _var;
@@ -333,7 +335,7 @@ namespace fastcgi
         size_t size = 0;
 
         while (size = (size_t)bufferevent_read(event, (void*)&buffer, 1024)) {
-            char *pFrom = &buffer;
+            char *pFrom = (char*)&buffer;
 
             while (size) {
                 pFrom = this->extractHeader(pFrom, size);
@@ -368,7 +370,7 @@ namespace fastcgi
         const char *raw = message.raw();
 
         if (raw != NULL) {
-            std::lock_guard guard(this->socketMutex);
+            std::lock_guard<std::mutex> guard(this->socketMutex);
             bufferevent_write(this->event, raw, message.getSize());
 
             return;
@@ -378,7 +380,7 @@ namespace fastcgi
         header.version = FCGI_VERSION_1;
         prepareOutRecordSegment(header);
 
-        std::lock_guard guard(this->socketMutex);
+        std::lock_guard<std::mutex> guard(this->socketMutex);
         bufferevent_write(this->event, &header, sizeof(header));
 
         if (message.getContentSize()) {
@@ -403,13 +405,15 @@ namespace fastcgi
             return;
         }
 
+        streams::InStreamBuffer* buf = NULL;
+
         switch (record.header.type) {
             case FCGI_ABORT_REQUEST:
                 this->valid = true;
                 break;
 
             case FCGI_PARAMS:
-                streams::InStreamBuffer* buf = dynamic_cast<streams::InStreamBuffer*>(this->_params.rdbuf());
+                buf = dynamic_cast<streams::InStreamBuffer*>(this->_params.rdbuf());
                 if (buf == NULL) {
                     break;
                 }
@@ -430,9 +434,9 @@ namespace fastcgi
 
             case FCGI_STDIN: // break intentionally omitted
             case FCGI_DATA:
-                streams::InStreamBuffer* buf = (record.header.type == FCGI_STDIN)?
-                        dynamic_cast<streams::InStreamBuffer*>(this->_stdin.rdbuf()) :
-                        dynamic_cast<streams::InStreamBuffer*>(this->_datain.rdbuf());
+                buf = (record.header.type == FCGI_STDIN)?
+                    dynamic_cast<streams::InStreamBuffer*>(this->_stdin.rdbuf()) :
+                    dynamic_cast<streams::InStreamBuffer*>(this->_datain.rdbuf());
 
                 if (buf != NULL) {
                     buf->addChunk(record);
@@ -530,7 +534,7 @@ namespace fastcgi
             throw IOException(oss.str());
         }
 
-        if (bind(this->fd, bindAddr, bindAddrLen) < 0) {
+        if (::bind(this->fd, bindAddr, bindAddrLen) < 0) {
             close(this->fd);
             std::ostringstream oss;
             oss << "Failed to bind socket to \"" << bind << "\"";
@@ -545,7 +549,8 @@ namespace fastcgi
     IOHandler::IOHandler(int socket) : event(NULL), fd(socket)
     {
         this->eventBase = event_base_new();
-        this->acceptcb = [this] (evconnlistener* listener, int fd, sockaddr* address, int socklen, void* ctx) {
+        this->acceptcb = NULL;
+        std::function<void(evconnlistener*, int, sockaddr*, int, void*)> fn = [this] (evconnlistener* listener, int fd, sockaddr* address, int socklen, void* ctx) {
             this->accept(fd, address, socklen);
         };
     }
@@ -602,13 +607,13 @@ namespace fastcgi
     {
         ClientPtr client(new Client(*this, fd));
 
-        std::lock_guard guard(this->clientListMutex);
+        std::lock_guard<std::mutex> guard(this->clientListMutex);
         this->clients.push_back(client);
     }
 
     void IOHandler::gc()
     {
-        std::lock_guard guard(this->clientListMutex);
+        std::lock_guard<std::mutex> guard(this->clientListMutex);
 
         for (auto it = this->clients.begin(); it != this->clients.end(); it++) {
             if (!(*it)->valid()) {
@@ -617,7 +622,7 @@ namespace fastcgi
         }
     }
 
-    static bool IOHandler::setNonBlocking(int fd)
+    bool IOHandler::setNonBlocking(int fd)
     {
         return (evutil_make_socket_nonblocking(fd) == 0);
     }
@@ -637,13 +642,13 @@ namespace fastcgi
 
     void WorkerQueue::push(WorkerCallbackPtr& ptr)
     {
-        std::lock_guard guard(this->protector);
+        std::lock_guard<std::mutex> guard(this->protector);
         parent::push(ptr);
     }
 
     WorkerCallbackPtr WorkerQueue::pop()
     {
-        std::lock_guard guard(this->protector);
+        std::lock_guard<std::mutex> guard(this->protector);
 
         if (this->empty()) {
             return WorkerCallbackPtr(NULL);
@@ -789,13 +794,13 @@ namespace fastcgi
         size_t Variable::putSize(char *buffer, const size_t& size) const
         {
             if (size > MAX_BYTE_SIZE) {
-                uint32_t s = convertToBigEndian(dynamic_cast<uint32_t>(size));
+                uint32_t s = convertToBigEndian((uint32_t)size);
                 memcpy(buffer, &s, sizeof(int32_t));
 
                 return sizeof(uint32_t);
             }
 
-            unsigned char v = dynamic_cast<unsigned char>(size);
+            unsigned char v = (unsigned char)size;
             memcpy(buffer, &v, sizeof(unsigned char));
 
             return sizeof(unsigned char);
@@ -943,7 +948,7 @@ namespace fastcgi
 
         const char* EndRequestMessage::getData() const
         {
-            return (char*)this->record.body;
+            return (const char*)&this->record.body;
         }
     }
 }

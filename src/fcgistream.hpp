@@ -2,10 +2,11 @@
  * FastCGI stream implementations
  */
 
-#pragma once;
+#pragma once
 
 #include <iostream>
 #include <vector>
+#include <list>
 
 #include "fastcgi_constants.hpp"
 
@@ -14,7 +15,10 @@ namespace fastcgi
     class Client;
     class IOHandler;
     class Request;
-    struct protocol::Record;
+
+    namespace protocol {
+        struct Record;
+    }
 
     namespace streams {
         struct chunk_t {
@@ -42,7 +46,7 @@ namespace fastcgi
                 }
         };
 
-        class InStreamBuffer : std::streambuf, ClosableStreamBuffer
+        class InStreamBuffer : public std::streambuf, public ClosableStreamBuffer
         {
             friend Request;
 
@@ -70,7 +74,7 @@ namespace fastcgi
                 bool ready() const;
         };
 
-        class OutStreamBuffer : std::streambuf, ClosableStreamBuffer
+        class OutStreamBuffer : public  std::streambuf, public ClosableStreamBuffer
         {
             using parent = std::streambuf;
             using char_type = typename parent::char_type;
@@ -133,7 +137,9 @@ namespace fastcgi
         class OutStream : public std::ostream
         {
             friend Client;
-            using OutStreamBuffer::role_t;
+
+            public:
+                typedef OutStreamBuffer::role_t role_t;
 
             protected:
                 /**

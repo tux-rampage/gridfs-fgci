@@ -26,5 +26,5 @@ configure_file(
 # add_subdirectory(fastcgipp)
 
 include_directories(${MongoDB_INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
-add_executable(gridfs-fcgi src/main.cpp)
+add_executable(gridfs-fcgi src/fastcgi.cpp src/fcgistream.cpp)
 target_link_libraries(gridfs-fcgi ${MongoDB_LIBRARIES} ${Boost_LIBRARIES})

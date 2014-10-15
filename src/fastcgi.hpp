@@ -3,9 +3,15 @@
 
 #include <stdexcept>
 #include <queue>
+#include <map>
+#include <memory>
+#include <thread>
+#include <mutex>
+
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -20,8 +26,16 @@
 namespace fastcgi
 {
     class IOHandler;
-    class IOException : public std::runtime_error {};
-    class IOSegmentViolationException : IOException {};
+    class IOException : public std::runtime_error {
+        public:
+            inline IOException(const std::string& msg) : std::runtime_error(msg)
+            {}
+    };
+    class IOSegmentViolationException : IOException {
+        public:
+            inline IOSegmentViolationException(const std::string& msg) : IOException(msg)
+            {};
+    };
 
     /**
      * Low level protocol
@@ -92,6 +106,7 @@ namespace fastcgi
                 uint32_t readSize(char *buffer, size_t& readSize) const;
 
             public:
+                inline Variable() {};
                 inline Variable(const std::string name, const std::string value) : _name(name), _value(value) {};
 
                 inline ~Variable() {};
@@ -236,7 +251,7 @@ namespace fastcgi
 
             protected:
                 size_t size; ///< The size of data buffer
-                char*  data; ///< Pointer to data buffer
+                const char* data; ///< Pointer to data buffer
 
             public:
                 /**
@@ -248,7 +263,7 @@ namespace fastcgi
         /**
          * Wraps EndRequestRecord
          */
-        class EndRequestMessage : Message
+        class EndRequestMessage : public Message
         {
             public:
                 EndRequestMessage(uint16_t id, uint32_t status, unsigned char fcgiStatus = 0);
