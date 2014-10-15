@@ -13,9 +13,8 @@ namespace fastcgi
 {
     class Client;
     class IOHandler;
-    class protocol::Request;
+    class Request;
     struct protocol::Record;
-
 
     namespace streams {
         struct chunk_t {
@@ -23,21 +22,41 @@ namespace fastcgi
             char* data = NULL;
         };
 
-        class InStreamBuffer : std::streambuf
+        /**
+         * Shared pointer to a client
+         */
+        typedef std::shared_ptr<Client> ClientPtr;
+
+
+        class ClosableStreamBuffer
         {
-            friend protocol::Request;
+            public:
+                virtual inline ~ClosableStreamBuffer() {};
+
+            protected:
+                bool closed = false;
 
             public:
-                inline InStreamBuffer(protocol::Request& request) :
-                	request(request),
-                	isInitialized(false),
-                	isComplete(false),
-                	std::streambuf() {};
+                virtual inline void close() {
+                    this->closed = true;
+                }
+        };
+
+        class InStreamBuffer : std::streambuf, ClosableStreamBuffer
+        {
+            friend Request;
+
+            public:
+                inline InStreamBuffer(Request& request) :
+                    request(request),
+                    isInitialized(false),
+                    isComplete(false),
+                    std::streambuf() {};
 
                 virtual ~InStreamBuffer();
 
             protected:
-                protocol::Request& request;
+                Request& request;
                 std::list<chunk_t> chunks;
                 std::list<chunk_t>::iterator current;
                 bool isInitialized;
@@ -51,53 +70,93 @@ namespace fastcgi
                 bool ready() const;
         };
 
-        class OutStreamBuffer : std::streambuf
-		{
-        	using parent = std::streambuf;
-        	using char_type = typename parent::char_type;
-        	using int_type = typename parent::int_type;
+        class OutStreamBuffer : std::streambuf, ClosableStreamBuffer
+        {
+            using parent = std::streambuf;
+            using char_type = typename parent::char_type;
+            using int_type = typename parent::int_type;
 
-			friend protocol::Request;
+            friend Request;
 
-			public:
-				const static size_t DEFAULT_CHUNKSIZE = 4086;
-				enum class role_t : unsigned char { STDOUT = FCGI_STDOUT, STDERR = FCGI_STDERR };
+            public:
+                const static size_t DEFAULT_CHUNKSIZE = 4086;
+                enum class role_t : unsigned char { STDOUT = FCGI_STDOUT, STDERR = FCGI_STDERR, VALUES_RESULT = FCGI_GET_VALUES_RESULT };
 
-				OutStreamBuffer(protocol::Request& request, const role_t& role, const size_t& chunksize = DEFAULT_CHUNKSIZE);
-				virtual ~OutStreamBuffer();
+                OutStreamBuffer(Request& request, const role_t& role, const size_t& chunksize = DEFAULT_CHUNKSIZE);
+                OutStreamBuffer(ClientPtr client, uint16_t requestId, const role_t& role, const size_t& chunksize = DEFAULT_CHUNKSIZE);
+                virtual ~OutStreamBuffer();
 
-			private:
-				char*  chunk;
-				size_t chunkSize;
+            private:
+                char*  chunk;
+                size_t chunkSize;
 
-				void resetChunk();
+                void resetChunk();
 
-			protected:
-				protocol::Request& request;
-				role_t role;
+            protected:
+                ClientPtr client;
+                uint16_t  requestId;
 
-				// Put Area
-				virtual int_type overflow(int_type ch);
-				virtual int sync();
-		};
+                role_t role;
 
+                // Put Area
+                virtual int_type overflow(int_type ch);
+                virtual int sync();
+
+            public:
+                virtual void close();
+        };
+
+        /**
+         * FCGI Input stream
+         */
         class InStream : public std::istream
         {
             public:
-                InStream(protocol::Request& request);
+                InStream(Request& request);
                 virtual ~InStream();
 
             public:
+                /**
+                 * Check if stream is ready
+                 */
                 bool isReady() const;
+
+                /**
+                 * Close the stream buffer
+                 */
+                void close();
         };
 
+        /**
+         * FastCGI Output stream
+         */
         class OutStream : public std::ostream
         {
-        	using OutStreamBuffer::role_t;
+            friend Client;
+            using OutStreamBuffer::role_t;
 
-        	public:
-        		OutStream(protocol::Request& request, const role_t& role);
-        		~OutStream();
+            protected:
+                /**
+                 * Construct directly with client
+                 *
+                 * @param[in]  client     The client instance
+                 * @param[in]  requestId  The FastCGI request ID
+                 * @param[in]  role       The FastCGI role
+                 */
+                OutStream(ClientPtr client, uint16_t requestId, const role_t& role);
+
+            public:
+                /**
+                 * @param[in]  request  The FastCGI request
+                 * @param[in]  role     The role of this stream
+                 */
+                OutStream(Request& request, const role_t& role);
+                ~OutStream();
+
+                /**
+                 * Close this stream
+                 */
+                void close();
         };
     }
 }

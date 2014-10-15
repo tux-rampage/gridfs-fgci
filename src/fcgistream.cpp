@@ -19,12 +19,18 @@ namespace fastcgi
 
         void InStreamBuffer::addChunk(const protocol::Record& record)
         {
-        	if (record.header.contentLength == 0) {
-        		this->isComplete = true;
-        		return;
-        	}
+            // Stream is closed
+            if (this->closed) {
+                return;
+            }
 
-        	size_t size = record.header.contentLength;
+            if (record.header.contentLength == 0) {
+                // Received EOF
+                this->isComplete = true;
+                return;
+            }
+
+            size_t size = record.header.contentLength;
             chunk_t chunk;
             chunk.data = new char[size];
             chunk.size = size;
@@ -35,6 +41,10 @@ namespace fastcgi
 
         std::streambuf::int_type InStreamBuffer::underflow()
         {
+            if (this->closed) {
+                return traits_type::eof();
+            }
+
             if (!this->isInitialized) {
                 this->current = this->chunks.begin();
             } else if (this->current != this->chunks.end()) {
@@ -51,11 +61,10 @@ namespace fastcgi
 
         std::streambuf::pos_type InStreamBuffer::seekpos(pos_type off, std::ios_base::openmode which)
         {
-            if (!(which & std::ios_base::in)) {
+            if (this->closed || !(which & std::ios_base::in)) {
                 return pos_type(off_type(-1));
             }
 
-            this->isInitialized;
             this->current = this->chunks.begin();
             size_t current = 0;
 
@@ -78,68 +87,93 @@ namespace fastcgi
         }
 
         bool InStreamBuffer::ready() const
-		{
-			return this->isComplete;
-		}
+        {
+            return this->isComplete;
+        }
 
 
         // Output Buffer
 
-        OutStreamBuffer::OutStreamBuffer(protocol::Request& request, const role_t& role, const size_t& chunksize) :
-			request(request),
-			role(role),
-			chunkSize(chunksize)
+        OutStreamBuffer::OutStreamBuffer(ClientPtr client, uint16_t requestId, const role_t& role, const size_t& chunksize) :
+            role(role),
+            chunkSize(chunksize),
+            requestId(requestId),
+            client(client)
         {
-        	this->chunk = new char[this->chunkSize];
-        	this->resetChunk();
+            if (role == role_t::VALUES_RESULT) {
+                this->requestId = 0;
+            }
+
+            this->chunk = new char[this->chunkSize];
+            this->resetChunk();
+        }
+
+        OutStreamBuffer::OutStreamBuffer(Request& request, const role_t& role, const size_t& chunksize) : OutStreamBuffer(request.client, request.getId(), role, chunksize)
+        {
         }
 
         OutStreamBuffer::~OutStreamBuffer()
         {
-        	this->setp(NULL, NULL);
-        	delete [] this->chunk;
+            this->setp(NULL, NULL);
+            delete [] this->chunk;
 
-        	this->chunk = NULL;
+            this->chunk = NULL;
         }
 
         void OutStreamBuffer::resetChunk()
         {
-        	memset(this->chunk, 0, this->chunkSize);
-        	this->setp(this->chunk, this->chunk + this->chunkSize);
+            memset(this->chunk, 0, this->chunkSize);
+            this->setp(this->chunk, this->chunk + this->chunkSize);
         }
 
         std::streambuf::int_type OutStreamBuffer::overflow(int_type ch)
         {
-        	if (this->sync() != 0) {
-        		this->setp(NULL, NULL);
-        		return traits_type::eof();
-        	}
+            if (this->sync() != 0) {
+                this->setp(NULL, NULL);
+                return traits_type::eof();
+            }
 
-        	if (ch != traits_type::eof()) {
-        		*this->chunk = (char)ch;
-        	}
+            if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+                *this->chunk = (char)ch;
+            }
 
-        	return 1;
+            return 1;
         }
 
         int OutStreamBuffer::sync()
         {
-        	protocol::Message msg(this->request.getId(), this->role);
+            if (this->closed) {
+                return -1;
+            }
 
-        	msg.setData(this->chunk, this->chunkSize);
-        	this->request.send(msg);
-        	this->resetChunk();
+            protocol::GenericMessage msg(this->requestId, this->role, this->chunk, this->chunkSize);
+            this->client->write(msg);
+            this->resetChunk();
 
-        	return 0;
+            return 0;
+        }
+
+        /**
+         * Close the output stream buffer
+         */
+        void OutStreamBuffer::close()
+        {
+            this->sync();
+
+            // Send EOF
+            protocol::GenericMessage msg(this->requestId, this->role, NULL, 0);
+            this->client->write(msg);
+
+            ClosableStreamBuffer::close();
         }
 
 
         // Stream Impl
 
-        InStream::InStream(protocol::Request& request)
+        InStream::InStream(Request& request)
         {
-        	std::shared_ptr<InStreamBuffer> b(new InStreamBuffer(request));
-        	std::istream(b);
+            std::shared_ptr<InStreamBuffer> b(new InStreamBuffer(request));
+            std::istream(b);
         }
 
         InStream::~InStream()
@@ -147,23 +181,46 @@ namespace fastcgi
 
         bool InStream::isReady() const
         {
-        	InStreamBuffer* buf = dynamic_cast<InStreamBuffer*>(this->rdbuf());
-        	if (buf == NULL) {
-        		return false;
-        	}
+            InStreamBuffer* buf = dynamic_cast<InStreamBuffer*>(this->rdbuf());
+            if (buf == NULL) {
+                return false;
+            }
 
-        	return buf->ready();
+            return buf->ready();
+        }
+
+        void InStream::close()
+        {
+            InStreamBuffer* buf = dynamic_cast<InStreamBuffer*>(this->rdbuf());
+
+            if (buf != NULL) {
+                buf->close();
+            }
         }
 
 
-        OutStream::OutStream(protocol::Request& request, const role_t& role)
+        OutStream::OutStream(ClientPtr client, uint16_t requestId, const role_t& role)
         {
-        	std::shared_ptr<OutStreamBuffer> b(new OutStreamBuffer(request, role));
-        	std::ostream(b);
+            std::shared_ptr<OutStreamBuffer> b(new OutStreamBuffer(client, requestId, role));
+            std::ostream(b);
+        }
+
+        OutStream::OutStream(Request& request, const role_t& role)
+        {
+            std::shared_ptr<OutStreamBuffer> b(new OutStreamBuffer(request, role));
+            std::ostream(b);
         }
 
         OutStream::~OutStream()
         {}
+
+        void OutStream::close()
+        {
+            OutStreamBuffer* buf = dynamic_cast<OutStreamBuffer*>(this->rdbuf());
+
+            if (buf != NULL) {
+                buf->close();
+            }
+        }
     }
 }
-
