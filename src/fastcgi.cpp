@@ -68,51 +68,11 @@ namespace fastcgi
     // libEvent - Helper functions
     //
 
-    /**
-     * Typedef to std::function for libevent buffer callbacks
-     */
-    typedef std::function<void(bufferevent*)> BufferEventCallback;
-
-    /**
-     * Typedef to std::function for libevent event callbacks
-     */
-    typedef std::function<void(bufferevent*, short)> GenericEventCallback;
-
-//    /**
-//     * callback function for libevent where arg should be a pointer to a BufferEventCallback
-//     *
-//     * @param[in]  event  Pointer to the libevent struct
-//     * @param[in]  arg    This should be a pointer to an BufferEventCallback
-//     */
-//    void libevent_bind_rw_callback(bufferevent* event, void* arg)
-//    {
-//        BufferEventCallback* cb = dynamic_cast<BufferEventCallback*>(arg);
-//
-//        if (cb != NULL) {
-//            (*cb)(event);
-//        } else {
-//            std::cerr << "Bad buffer r/w event callback in arg " << arg << "!" << std::endl;
-//        }
-//    }
-//
-//    /**
-//     * Called by libevent when an event on the underlying socket occours.
-//     *
-//     * @param[in]  event  Pointer to the libevent struct
-//     * @param[in]  events Event codes
-//     * @param[in]  arg    This should be a pointer to an ErrorEventCallback
-//     */
-//    void libevent_bind_error_callback(bufferevent* event, short events, void *arg)
-//    {
-//        GenericEventCallback* cb = dynamic_cast<GenericEventCallback*>(arg);
-//
-//        if (cb != NULL) {
-//            (*cb)(event, events);
-//        } else {
-//            std::cerr << "Bad generic event callback in arg " << arg << "!" << std::endl;
-//        }
-//    }
-
+    void Client::eventReadCallback(bufferevent* event, void* arg)
+    {
+        Client* client = (Client*)arg;
+        client->onRead(event);
+    }
 
 
     /////////////////////////////////////////////////////////////////////////////////////
@@ -142,8 +102,7 @@ namespace fastcgi
             throw IOException("Failed to allocate event buffer for client");
         }
 
-        this->readcb = std::function(std::bind(Client::onRead, this, _1));
-        bufferevent_setcb(this->event, this->readcb, NULL, NULL, this);
+        bufferevent_setcb(this->event, Client::eventReadCallback, NULL, NULL, this);
         bufferevent_enable(this->event, EV_READ|EV_WRITE);
     }
 
@@ -158,23 +117,28 @@ namespace fastcgi
     // Incomming record preparation (possible big endian conversion)
     //
 
+    //! Specialization for header segment
     template<> void Client::prepareInRecordSegment<protocol::Header>(protocol::Header& segment) {
         segment.contentLength = convertFromBigEndian(segment.contentLength);
         segment.requestId = convertFromBigEndian(segment.contentLength);
     };
 
+    //! Specialization for BeginRequestBody
     template<> void Client::prepareInRecordSegment<protocol::BeginRequestBody>(protocol::BeginRequestBody& body)
     {
         body.role = convertFromBigEndian(body.role);
     };
 
+    //! Specialization for EndRequestBody
     template<> void Client::prepareInRecordSegment<protocol::EndRequestBody>(protocol::EndRequestBody& segment)
     {
         segment.appStatus = convertFromBigEndian(segment.appStatus);
     };
 
+    //! Default implementation
     template<class T> void Client::prepareInRecordSegment(T& segment)
     {
+        // NOOP
     }
 
 
@@ -546,18 +510,29 @@ namespace fastcgi
         }
     }
 
-    IOHandler::IOHandler(int socket) : event(NULL), fd(socket)
+    IOHandler::IOHandler(int socket) : event(NULL), listener(NULL), fd(socket)
     {
         this->eventBase = event_base_new();
-        this->acceptcb = NULL;
-        std::function<void(evconnlistener*, int, sockaddr*, int, void*)> fn = [this] (evconnlistener* listener, int fd, sockaddr* address, int socklen, void* ctx) {
-            this->accept(fd, address, socklen);
-        };
     }
 
     IOHandler::~IOHandler()
     {
         event_base_free(this->eventBase);
+        close(this->fd);
+    }
+
+    //! accept callback helper
+    void IOHandler::eventAcceptCallback(evconnlistener* event, int fd, sockaddr* clientAddress, int len, void* arg)
+    {
+        IOHandler* instance = (IOHandler*)arg;
+        instance->accept(fd, clientAddress, len);
+    }
+
+    //! Error callback
+    void IOHandler::eventErrorCallback(evconnlistener* listener, void* ptr)
+    {
+        IOHandler* instance = (IOHandler*)ptr;
+        instance->onError(listener);
     }
 
     void IOHandler::addHandler(HandlerPtr handler)
@@ -590,19 +565,27 @@ namespace fastcgi
         throw IOException(oss.str());
     }
 
+    //! Run the IO handler thread
     void IOHandler::run()
     {
-        this->event = bufferevent_socket_new(this->eventBase, this->fd, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
-        auto listener = evconnlistener_new(this->eventBase, this->acceptcb, NULL, LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1, this->fd);
+        this->event = bufferevent_socket_new(this->eventBase, this->fd, BEV_OPT_DEFER_CALLBACKS);
+        auto listener = evconnlistener_new(this->eventBase, IOHandler::eventAcceptCallback, this, LEV_OPT_REUSEABLE, -1, this->fd);
+
+        if (!this->event) {
+            throw IOException("Could not initialize event");
+        }
 
         if (!listener) {
             throw IOException("Could not initialize listener");
         }
 
+        evconnlistener_set_error_cb(listener, IOHandler::eventErrorCallback);
+        evconnlistener_enable(listener);
         event_base_dispatch(this->eventBase);
         evconnlistener_free(listener);
     }
 
+    //! Accept a client connection
     void IOHandler::accept(int fd, sockaddr* address, int socketlen)
     {
         ClientPtr client(new Client(*this, fd));
@@ -611,6 +594,7 @@ namespace fastcgi
         this->clients.push_back(client);
     }
 
+    //! Garbage collect
     void IOHandler::gc()
     {
         std::lock_guard<std::mutex> guard(this->clientListMutex);
@@ -622,6 +606,16 @@ namespace fastcgi
         }
     }
 
+    //! Handle errors
+    void IOHandler::onError(evconnlistener* error)
+    {
+        int err = EVUTIL_SOCKET_ERROR();
+        std::cerr << "Socket listener error " << err << ": " << evutil_socket_error_to_string(err) << std::endl;
+
+        event_base_loopexit(this->eventBase, NULL);
+    }
+
+    //! Make filedescriptor non-blocking
     bool IOHandler::setNonBlocking(int fd)
     {
         return (evutil_make_socket_nonblocking(fd) == 0);

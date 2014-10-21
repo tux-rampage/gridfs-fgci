@@ -329,8 +329,13 @@ namespace fastcgi
     {
         using parent = std::queue<WorkerCallbackPtr>;
 
+        public:
+            inline WorkerQueue() : terminated(false)
+            {};
+
         protected:
             std::mutex protector;
+            bool terminated;
 
         public:
             void push(WorkerCallbackPtr& ptr);
@@ -341,7 +346,28 @@ namespace fastcgi
              * If the queue is empy, the callback will be a nullptr
              */
             WorkerCallbackPtr pop();
+
+            /**
+             * Terminate the worker queue and tell all handlers to exit
+             */
+            void terminate();
     };
+
+    class Worker
+    {
+        friend WorkerQueue;
+
+        protected:
+            Worker(WorkerQueue& queue);
+            ~Worker();
+
+        protected:
+            WorkerQueue& queue;
+
+        public:
+            void operator()();
+    };
+
 
     /**
      * Http Request
@@ -432,8 +458,28 @@ namespace fastcgi
 //            enum StreamType { STDOUT, STDERR };
 
         public:
+            /**
+             * Helper method for preparing incoming records (performing int endian conversion)
+             *
+             * @param[in|out] segment
+             */
             template<class T> static void prepareInRecordSegment(T& segment);
+
+            /**
+             * Helper method for preparing outgoing records (performing int endian conversion)
+             *
+             * @param[in|out] segment
+             */
             template<class T> static void prepareOutRecordSegment(T& segment);
+
+            /**
+             * Helper function for libevent callbacks
+             *
+             * @param[in] event
+             * @param[in] ptr   Pointer to the client instance
+             */
+            static void eventReadCallback(bufferevent* event, void* arg);
+
 
         protected:
             int socket; ///< Socket descriptor
@@ -450,6 +496,11 @@ namespace fastcgi
              */
             void dispatch();
 
+            /**
+             * Called when a read event occours
+             */
+            void onRead(bufferevent*);
+
         private:
             size_t headerBytesRead;
             size_t contentBytesRead;
@@ -459,7 +510,6 @@ namespace fastcgi
             bool contentReady;
             bool paddingReady;
 
-            bufferevent_data_cb readcb;
             bufferevent *event;
 
             /**
@@ -485,11 +535,6 @@ namespace fastcgi
 
         public:
             /**
-             * Called when a read event occours
-             */
-            void onRead(bufferevent*);
-
-            /**
              * Send a message to the client
              *
              * @param[in]  message  The message to send
@@ -505,12 +550,10 @@ namespace fastcgi
             };
     };
 
-
     /**
      * Shared Pointer to a client
      */
     typedef std::shared_ptr<Client> ClientPtr;
-
 
     /**
      * Handles FastCGI I/O via libevent
@@ -538,23 +581,31 @@ namespace fastcgi
              */
             virtual ~IOHandler();
 
+        public:
+            /**
+             * libevent helper - accept callback
+             */
+            static void eventAcceptCallback(evconnlistener* event, int fd, sockaddr* clientAddress, int len, void* arg);
+
+            /**
+             * Libevent helper method - error callback
+             */
+            static void eventErrorCallback(evconnlistener* event, void* arg);
+
+
         protected:
             typedef std::vector<ClientPtr> ClientList;
 
             int fd; ///< Filedescriptor for listening socket
 
             event_base* eventBase; ///< Event base instance
-            bufferevent* event;    /// event instance
+            bufferevent* event;    ///< event instance
+            evconnlistener* listener; ///< Connection listener
 
             std::vector<HandlerPtr> handlers; ///< Registered handlers
             ClientList clients; ///< active clients
 
             std::mutex clientListMutex;
-
-            /**
-             * Buffer event callback
-             */
-            void (*acceptcb)(evconnlistener*, int, sockaddr*, int, void*);
 
         /**
          * Handler methods
@@ -564,6 +615,11 @@ namespace fastcgi
              * Called to accept a new client connection
              */
             virtual void accept(int fd, sockaddr* address, int socketlen);
+
+            /**
+             * handle socket errors
+             */
+            virtual void onError(evconnlistener*);
 
             /**
              * Run garbage collection
