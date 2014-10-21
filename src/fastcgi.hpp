@@ -4,9 +4,11 @@
 #include <stdexcept>
 #include <queue>
 #include <map>
+#include <list>
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
@@ -330,20 +332,30 @@ namespace fastcgi
         using parent = std::queue<WorkerCallbackPtr>;
 
         public:
-            inline WorkerQueue() : terminated(false)
-            {};
+            WorkerQueue();
+            ~WorkerQueue();
 
         protected:
             std::mutex protector;
+            std::condition_variable readyCondition;
             bool terminated;
+            std::list<std::thread*> threadPool;
 
         public:
+            /**
+             * Push an elment to the queue and notify a worker threads
+             *
+             * @param[in] WorkerCallbackPtr
+             */
             void push(WorkerCallbackPtr& ptr);
 
             /**
-             * remove and return the first element in queue
+             * Remove and return the first element in queue
              *
-             * If the queue is empy, the callback will be a nullptr
+             * This method must be called in a worker thread, since this call blocks
+             * until 1) a handler is pushed to the queue or b) the queue is terminated.
+             *
+             * The callback pointer might be a null pointer (e.g. on queue termination)
              */
             WorkerCallbackPtr pop();
 
@@ -351,13 +363,31 @@ namespace fastcgi
              * Terminate the worker queue and tell all handlers to exit
              */
             void terminate();
+
+            /**
+             * check if the queue is terminated
+             */
+            bool isTerminated() const;
+
+            /**
+             * Run the worker queue with the given amount of threads.
+             *
+             * This method will not block and can savely be called from the main thread.
+             *
+             * @param[in] threadCount  The number of worker threads to create.
+             *                         If this param is < 1, the number of threads will be
+             *                         guessed std::thread::hardware_concurrency but at minimum 1
+             *                         thread is created
+             */
+            void run(unsigned int threadCount);
     };
 
+    /**
+     * Worker Thread
+     */
     class Worker
     {
-        friend WorkerQueue;
-
-        protected:
+        public:
             Worker(WorkerQueue& queue);
             ~Worker();
 
@@ -375,6 +405,10 @@ namespace fastcgi
     class Request
     {
         friend streams::OutStreamBuffer;
+
+        public:
+            Request(const uint16_t& id, ClientPtr client);
+            ~Request();
 
         public:
             typedef std::shared_ptr<Client> ClientPtr;
@@ -402,9 +436,6 @@ namespace fastcgi
             void processIncommingRecord(const protocol::Record& record);
 
         public:
-            Request(const uint16_t& id, ClientPtr client);
-            ~Request();
-
             void send(protocol::Message& msg);
             void finish(uint32_t status);
 
@@ -604,6 +635,7 @@ namespace fastcgi
 
             std::vector<HandlerPtr> handlers; ///< Registered handlers
             ClientList clients; ///< active clients
+            WorkerQueue workerQueue;
 
             std::mutex clientListMutex;
 
@@ -652,7 +684,7 @@ namespace fastcgi
             /**
              * Run the I/O event loop
              */
-            void run();
+            void run(unsigned int workerCount);
 
             /**
              * Make a file descriptor non blocking

@@ -287,6 +287,22 @@ namespace fastcgi
             return;
         }
 
+        uint16_t id = this->currentRecord.header.requestId;
+
+        if (id < 1) {
+            // TODO: Invalid request id
+        }
+
+        if (this->currentRecord.header.type == FCGI_BEGIN_REQUEST) {
+            auto result = this->requests.find(id);
+
+            if (result != this->requests.end()) {
+                // this->write(Invalid)
+            }
+
+            this->requests[id] = Request(id, *this);
+
+        }
         // TODO: Implement request dispatch
     };
 
@@ -566,7 +582,7 @@ namespace fastcgi
     }
 
     //! Run the IO handler thread
-    void IOHandler::run()
+    void IOHandler::run(unsigned int workerCount)
     {
         this->event = bufferevent_socket_new(this->eventBase, this->fd, BEV_OPT_DEFER_CALLBACKS);
         auto listener = evconnlistener_new(this->eventBase, IOHandler::eventAcceptCallback, this, LEV_OPT_REUSEABLE, -1, this->fd);
@@ -581,6 +597,10 @@ namespace fastcgi
 
         evconnlistener_set_error_cb(listener, IOHandler::eventErrorCallback);
         evconnlistener_enable(listener);
+
+        // Start the worker queue
+        this->workerQueue.run(workerCount);
+
         event_base_dispatch(this->eventBase);
         evconnlistener_free(listener);
     }
@@ -634,24 +654,122 @@ namespace fastcgi
     // Worker queue
     //
 
+    WorkerQueue::WorkerQueue() : terminated(false)
+    {
+    }
+
+    WorkerQueue::~WorkerQueue()
+    {
+        this->terminate();
+
+        for (auto thread : this->threadPool) {
+            if (thread->joinable()) {
+                thread->join();
+            }
+
+            delete thread;
+        }
+
+        this->threadPool.clear();
+    }
+
     void WorkerQueue::push(WorkerCallbackPtr& ptr)
     {
-        std::lock_guard<std::mutex> guard(this->protector);
+        std::unique_lock<std::mutex> lock(this->protector);
+
+        lock.lock();
         parent::push(ptr);
+        lock.unlock();
+
+        this->readyCondition.notify_one();
     }
 
     WorkerCallbackPtr WorkerQueue::pop()
     {
-        std::lock_guard<std::mutex> guard(this->protector);
+        std::unique_lock<std::mutex> lock(this->protector);
+        lock.lock();
 
         if (this->empty()) {
+            lock.unlock();
+            this->readyCondition.wait(lock);
+        }
+
+        // Still empty or terminated?
+        if (this->empty() || this->terminated) {
             return WorkerCallbackPtr(NULL);
         }
 
         WorkerCallbackPtr ptr = this->front();
+
         parent::pop();
+        lock.unlock();
 
         return ptr;
+    }
+
+    /**
+     * Request worker termination
+     */
+    void WorkerQueue::terminate()
+    {
+        this->terminated = true;
+        this->readyCondition.notify_all();
+    }
+
+    /**
+     * Check if queue is terminated
+     */
+    bool WorkerQueue::isTerminated() const
+    {
+        return this->terminated;
+    }
+
+    /**
+     * Run the worker queue
+     */
+    void WorkerQueue::run(unsigned int threadCount)
+    {
+        this->terminated = false;
+
+        if (threadCount < 1) {
+            threadCount = std::thread::hardware_concurrency();
+
+            if (threadCount < 1) {
+                threadCount = 1;
+            }
+        }
+
+        for (auto i = 0; i < threadCount; i++) {
+            auto thread = new std::thread(Worker(*this));
+            this->threadPool.push_back(thread);
+        }
+    }
+
+    /**
+     * Create a new worker
+     */
+    Worker::Worker(WorkerQueue& queue) : queue(queue)
+    {
+    }
+
+    Worker::~Worker()
+    {
+    }
+
+    void Worker::operator ()()
+    {
+        while(!this->queue.isTerminated()) {
+            auto handler = this->queue.pop();
+
+            // Null pointer
+            if (handler == NULL) {
+                continue;
+            }
+
+            if (!(*handler)()) {
+                this->queue.push(handler);
+            }
+        }
     }
 
     ///////////////////////////////////////////////////////////////////////////
