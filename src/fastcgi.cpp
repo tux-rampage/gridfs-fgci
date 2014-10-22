@@ -2,7 +2,7 @@
 #include <functional>
 #include <regex>
 #include <sstream>
-
+#include <signal.h>
 #include <unistd.h>
 
 #include "fastcgi.hpp"
@@ -87,16 +87,14 @@ namespace fastcgi
             contentReady(false),
             headerReady(false),
             paddingReady(false),
-            isValid(true)
+            isValid(true),
+            keepConnection(true)
     {
-        // bind placeholders like _1, _2, _3 ...
-        using namespace std::placeholders;
-
         if (!IOHandler::setNonBlocking(socket)) {
             throw IOException("Failed to make socket fd non-blocking.");
         }
 
-        this->event = bufferevent_socket_new(io.eventBase, socket, BEV_OPT_DEFER_CALLBACKS | BEV_OPT_CLOSE_ON_FREE);
+        this->event = bufferevent_socket_new(io.eventBase, socket, BEV_OPT_DEFER_CALLBACKS | BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
 
         if (this->event == NULL) {
             throw IOException("Failed to allocate event buffer for client");
@@ -108,9 +106,7 @@ namespace fastcgi
 
     Client::~Client()
     {
-        if (this->event != NULL) {
-            bufferevent_free(this->event);
-        }
+        this->destroy();
     }
 
     /////////////////////////////////////////////////////////////////
@@ -288,71 +284,168 @@ namespace fastcgi
         }
 
         uint16_t id = this->currentRecord.header.requestId;
+        protocol::Header& header(this->currentRecord.header);
 
-        if (id < 1) {
-            // TODO: Invalid request id
+        if (id == FCGI_NULL_REQUEST_ID) {
+            //this->write()
+            // TODO: Unknown record
+            return;
         }
+
+        // FIXME: Race contition
 
         if (this->currentRecord.header.type == FCGI_BEGIN_REQUEST) {
-            auto result = this->requests.find(id);
-
-            if (result != this->requests.end()) {
-                // this->write(Invalid)
+            if (this->hasRequest(id)) {
+                std::ostringstream msg;
+                msg << "The request " << id << " was already started!";
+                throw IOSegmentViolationException(msg.str());
             }
 
-            this->requests[id] = Request(id, *this);
+            if (header.contentLength != sizeof(protocol::BeginRequestBody)) {
+                throw IOSegmentViolationException("Bad content length for begin request record!");
+            }
 
+            protocol::BeginRequestBody* body = (protocol::BeginRequestBody*)this->currentRecord.content;
+            prepareInRecordSegment(*body);
+
+            if (!this->io.isRoleAccepted(body->role)) {
+                // TODO: unaccepted role
+                return;
+            }
+
+            if ((body->flags & FCGI_KEEP_CONN) == 0) {
+                this->keepConnection = false;
+            }
+
+            this->requests[id] = std::make_shared<Request>(id, body->role, *this);
+            this->requests[id]->setHandler(this->io.getHandlerFactory(body->role)->factory(*this->requests[id]));
+
+            return;
         }
-        // TODO: Implement request dispatch
+
+        if (!this->hasRequest(id)) {
+            std::ostringstream msg;
+            msg << "Request (" << id << ") was not started with FCGI_BEGIN_REQUEST";
+            throw IOSegmentViolationException(msg.str());
+        }
+
+        this->requests[id]->processIncommingRecord(this->currentRecord);
     };
+
+    /**
+     * reset the record state
+     */
+    void Client::resetRecordState()
+    {
+        if (this->currentRecord.content != NULL) {
+            delete[] this->currentRecord.content;
+        }
+
+        memset(&this->currentRecord, 0, sizeof(this->currentRecord));
+
+        this->currentRecord.content = NULL;
+        this->headerReady = false;
+        this->contentReady = false;
+        this->paddingReady = false;
+        this->headerBytesRead = 0;
+        this->contentBytesRead = 0;
+        this->paddingBytesRead = 0;
+    }
 
     /**
      * Read data from socket
      */
     void Client::onRead(bufferevent* event)
     {
+        if (!this->isValid) {
+            return;
+        }
+
         char buffer[1024];
         size_t size = 0;
 
-        while (size = (size_t)bufferevent_read(event, (void*)&buffer, 1024)) {
+        while ((0 < (size = (size_t)bufferevent_read(event, (void*)&buffer, 1024))) && this->valid()) {
             char *pFrom = (char*)&buffer;
 
-            while (size) {
+            while (size && this->valid()) {
                 pFrom = this->extractHeader(pFrom, size);
                 pFrom = this->extractContent(pFrom, size);
                 pFrom = this->extractPadding(pFrom, size);
 
                 if (this->paddingReady) {
-                    this->dispatch();
+                    try {
+                        this->dispatch();
+                    } catch (IOException& e) {
+                        std::cerr << "Client (" << this->socket << "): IOException: " << e.what() << std::endl;
+                        this->destroy();
+                        return;
+                    }
 
-                    delete[] this->currentRecord.content;
-
-                    memset(&this->currentRecord, 0, sizeof(this->currentRecord));
-
-                    this->currentRecord.content = NULL;
-                    this->headerReady = false;
-                    this->contentReady = false;
-                    this->paddingReady = false;
-                    this->headerBytesRead = 0;
-                    this->contentBytesRead = 0;
-                    this->paddingBytesRead = 0;
+                    this->resetRecordState();
                 }
             }
         }
     };
 
+    bool Client::hasRequest(uint16_t id)
+    {
+        auto result = this->requests.find(id);
+        return ((result != this->requests.end()) && (result->second != NULL) && result->second->isValid());
+    }
+
+    /**
+     * Destroy the client instance
+     */
+    void Client::destroy()
+    {
+        std::lock_guard<std::mutex> guard(this->socketMutex);
+
+        this->isValid = false;
+        this->resetRecordState();
+
+        if (this->event != NULL) {
+            bufferevent_disable(this->event, EV_READ | EV_WRITE);
+            bufferevent_free(this->event);
+            this->event = NULL;
+        }
+    }
+
+    void Client::eventGcCallback(int fd, short eventType, void* ptr)
+    {
+        ((Client*)ptr)->gc();
+    }
+
+    // Perform garbage collection
+    void Client::gc()
+    {
+        // FIXME: Race condition
+
+        auto iterator = this->requests.begin();
+
+        while (iterator != this->requests.end()) {
+            if ((iterator->second == NULL) || !iterator->second->isValid()) {
+                this->requests.erase(iterator++);
+            } else {
+                iterator++;
+            }
+        }
+    }
 
     /**
      * Write chunk implementation
      */
     void Client::write(protocol::Message &message)
     {
+        std::unique_lock<std::mutex> guard(this->socketMutex);
+        guard.lock();
+
+        if (!this->valid()) {
+            return;
+        }
+
         const char *raw = message.raw();
-
         if (raw != NULL) {
-            std::lock_guard<std::mutex> guard(this->socketMutex);
             bufferevent_write(this->event, raw, message.getSize());
-
             return;
         }
 
@@ -360,7 +453,6 @@ namespace fastcgi
         header.version = FCGI_VERSION_1;
         prepareOutRecordSegment(header);
 
-        std::lock_guard<std::mutex> guard(this->socketMutex);
         bufferevent_write(this->event, &header, sizeof(header));
 
         if (message.getContentSize()) {
@@ -373,6 +465,12 @@ namespace fastcgi
 
             bufferevent_write(this->event, padding, message.getPaddingSize());
             delete [] padding;
+        }
+
+        guard.unlock();
+
+        if (message.getHeader().type == FCGI_END_REQUEST) {
+            this->destroy();
         }
     };
 
@@ -393,50 +491,70 @@ namespace fastcgi
                 break;
 
             case FCGI_PARAMS:
-                buf = dynamic_cast<streams::InStreamBuffer*>(this->_params.rdbuf());
+                buf = dynamic_cast<streams::InStreamBuffer*>(this->paramStream.rdbuf());
                 if (buf == NULL) {
                     break;
                 }
 
                 buf->addChunk(record);
 
-                if (this->_params.isReady()) {
-                    for (auto p : protocol::Variable::parseFromStream(this->_params)) {
+                if (this->paramStream.isReady()) {
+                    for (auto p : protocol::Variable::parseFromStream(this->paramStream)) {
                         this->params[p.name()] = p.value();
                     }
 
-                    if (this->role != Role::FILTER) {
-                        this->ready = true;
-                    }
+                    this->ready = true;
                 }
 
                 break;
 
             case FCGI_STDIN: // break intentionally omitted
             case FCGI_DATA:
+                if (!this->ready) {
+                    std::ostringstream msg;
+                    msg << "Invalid stream record order. FastCGI PARAMS is not complete, yet - thus the request is not ready.";
+                    throw IOSegmentViolationException(msg.str());
+                }
+
                 buf = (record.header.type == FCGI_STDIN)?
                     dynamic_cast<streams::InStreamBuffer*>(this->_stdin.rdbuf()) :
                     dynamic_cast<streams::InStreamBuffer*>(this->_datain.rdbuf());
 
-                if (buf != NULL) {
-                    buf->addChunk(record);
+                if (buf == NULL) {
+                    break;
                 }
 
+                buf->addChunk(record);
+
+                if (this->handler != NULL) {
+                    this->handler->onReceiveData(record);
+                }
+
+                break;
+
+            case FCGI_ABORT_REQUEST:
+                if (this->handler) {
+                    this->handler->onAbort();
+                } else {
+                    this->finish(1);
+                }
 
                 break;
 
             default:
+                // Ignore unknown records. Is this a good idea?
                 break;
         }
     }
 
-    Request::Request(const uint16_t& id, ClientPtr client) :
+    Request::Request(const uint16_t& id, Role role, ClientPtr client) :
             client(client),
             id(id),
-            role(Role::RESPONDER),
+            role(role),
             valid(false),
             ready(false),
-            _params(*this),
+            handler(NULL),
+            paramStream(*this),
             _stdin(*this),
             _datain(*this),
             _stdout(*this, streams::OutStreamBuffer::role_t::STDOUT),
@@ -448,15 +566,34 @@ namespace fastcgi
     {
     }
 
+
+    void Request::setHandler(RequestHandlerPtr handler)
+    {
+        this->handler = handler;
+    }
+
     void Request::send(protocol::Message& msg)
     {
         this->client->write(msg);
     }
 
+    // Finish the request
     void Request::finish(uint32_t status)
     {
         protocol::EndRequestMessage end(this->getId(), status, 0);
         this->client->write(end);
+
+        this->_datain.close();
+        this->_stdin.close();
+        this->_stderr.close();
+        this->_stdout.close();
+
+        this->valid = false;
+    }
+
+    bool Request::isValid()
+    {
+        return this->valid;
     }
 
     /////////////////////////////////////////////////////////////////////
@@ -526,32 +663,44 @@ namespace fastcgi
         }
     }
 
-    IOHandler::IOHandler(int socket) : event(NULL), listener(NULL), fd(socket)
+    IOHandler::IOHandler(int socket) :
+            fd(socket),
+            gcInterval({ 10, 0 }) // default gc every 10 seconds
     {
         this->eventBase = event_base_new();
     }
 
     IOHandler::~IOHandler()
     {
+        this->clearListeners();
         event_base_free(this->eventBase);
         close(this->fd);
     }
 
     //! accept callback helper
-    void IOHandler::eventAcceptCallback(evconnlistener* event, int fd, sockaddr* clientAddress, int len, void* arg)
+    void IOHandler::eventAcceptCallback(evconnlistener* event, int fd, sockaddr* clientAddress, int len, void* ptr)
     {
-        IOHandler* instance = (IOHandler*)arg;
-        instance->accept(fd, clientAddress, len);
+        ((IOHandler*)ptr)->accept(fd, clientAddress, len);
     }
 
     //! Error callback
     void IOHandler::eventErrorCallback(evconnlistener* listener, void* ptr)
     {
-        IOHandler* instance = (IOHandler*)ptr;
-        instance->onError(listener);
+        ((IOHandler*)ptr)->onError(listener);
     }
 
-    void IOHandler::addHandler(HandlerPtr handler)
+    //! GC trigger
+    void IOHandler::eventGcCallback(int fd, short type, void *ptr)
+    {
+        ((IOHandler*)ptr)->gc();
+    }
+
+    void IOHandler::eventSignalCallback(int signal, short type, void* ptr)
+    {
+        // TODO: Exit the I/O Handler
+    }
+
+    void IOHandler::addHandlerFactory(HandlerFactoryPtr handler)
     {
         this->handlers.push_back(handler);
     }
@@ -567,7 +716,7 @@ namespace fastcgi
         return false;
     }
 
-    HandlerPtr IOHandler::getHandler(uint16_t role)
+    HandlerFactoryPtr IOHandler::getHandlerFactory(uint16_t role)
     {
         for (auto handler : this->handlers) {
             if (handler->acceptRole(role)) {
@@ -584,16 +733,19 @@ namespace fastcgi
     //! Run the IO handler thread
     void IOHandler::run(unsigned int workerCount)
     {
-        this->event = bufferevent_socket_new(this->eventBase, this->fd, BEV_OPT_DEFER_CALLBACKS);
+        auto gc = event_new(this->eventBase, -1, EV_PERSIST, IOHandler::eventGcCallback, this);
+        auto sig = evsignal_new(this->eventBase, SIGTERM, IOHandler::eventSignalCallback, this);
         auto listener = evconnlistener_new(this->eventBase, IOHandler::eventAcceptCallback, this, LEV_OPT_REUSEABLE, -1, this->fd);
 
-        if (!this->event) {
-            throw IOException("Could not initialize event");
-        }
+        this->eventListeners.push_back(gc);
+        this->eventListeners.push_back(sig);
 
         if (!listener) {
-            throw IOException("Could not initialize listener");
+            throw IOException("Could not initialize event listeners");
         }
+
+        evtimer_add(gc, &this->gcInterval);
+        evsignal_add(sig, NULL);
 
         evconnlistener_set_error_cb(listener, IOHandler::eventErrorCallback);
         evconnlistener_enable(listener);
@@ -601,7 +753,11 @@ namespace fastcgi
         // Start the worker queue
         this->workerQueue.run(workerCount);
 
+        // Dispatch the event loop
         event_base_dispatch(this->eventBase);
+
+        this->clearListeners();
+        evconnlistener_disable(listener);
         evconnlistener_free(listener);
     }
 
@@ -635,6 +791,23 @@ namespace fastcgi
         event_base_loopexit(this->eventBase, NULL);
     }
 
+    /**
+     * Clear all event listeners
+     */
+    void IOHandler::clearListeners()
+    {
+        for (auto event : this->eventListeners) {
+            if (event == NULL) {
+                continue;
+            }
+
+            event_del(event);
+            event_free(event);
+        }
+
+        this->eventListeners.clear();
+    }
+
     //! Make filedescriptor non-blocking
     bool IOHandler::setNonBlocking(int fd)
     {
@@ -643,9 +816,49 @@ namespace fastcgi
 
 
     // Responder is the only supported role by default
-    bool Handler::acceptRole(uint16_t role)
+    bool HandlerFactory::acceptRole(uint16_t role)
     {
         return (role == FCGI_RESPONDER);
+    }
+
+
+    ///////////////////////////////////////////////////////////////
+    //
+    // Request handler
+    //
+
+    RequestHandler::RequestHandler(Request& request)
+    {
+        this->request = &request;
+    }
+
+    RequestHandler::~RequestHandler()
+    {
+    }
+
+    Request& RequestHandler::getRequest() throw (std::runtime_error)
+    {
+        if (this->request == NULL) {
+            throw std::runtime_error("Request is NULL for the current handler instance");
+        }
+
+        return *this->request;
+    }
+
+    void RequestHandler::finish(uint16_t status)
+    {
+        this->getRequest().finish(status);
+        this->request = NULL;
+    }
+
+    void RequestHandler::onReceiveData(const protocol::Record& record)
+    {
+        // NOOP
+    }
+
+    void RequestHandler::onAbort()
+    {
+        this->finish(1);
     }
 
 

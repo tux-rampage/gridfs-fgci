@@ -8,6 +8,24 @@ namespace fastcgi
 {
     namespace streams
     {
+        //! Helper function to receive stream name
+        std::string getStreamNameFromFCGIType(unsigned char type)
+        {
+            switch (type) {
+                case FCGI_STDIN:
+                    return std::string("STDIN");
+
+                case FCGI_DATA:
+                    return std::string("DATA");
+
+                case FCGI_PARAMS:
+                    return std::string("PARAMS");
+
+                default:
+                    return std::string("UNKNOWN");
+            }
+        }
+
         InStreamBuffer::~InStreamBuffer()
         {
             for (auto& chunk : this->chunks) {
@@ -22,6 +40,12 @@ namespace fastcgi
             // Stream is closed
             if (this->closed) {
                 return;
+            }
+
+            if (this->isComplete) {
+                std::ostringstream msg;
+                msg << "Out of sequence record chunk for FastCGI stream " << getStreamNameFromFCGIType(record.header.type);
+                throw IOSegmentViolationException(msg.str());
             }
 
             if (record.header.contentLength == 0) {

@@ -28,11 +28,15 @@
 namespace fastcgi
 {
     class IOHandler;
+    class Request;
+    class Client;
+
     class IOException : public std::runtime_error {
         public:
             inline IOException(const std::string& msg) : std::runtime_error(msg)
             {}
     };
+
     class IOSegmentViolationException : IOException {
         public:
             inline IOSegmentViolationException(const std::string& msg) : IOException(msg)
@@ -282,12 +286,70 @@ namespace fastcgi
     };
 
     /**
-     * Interface for Handler implementations
+     * Abstract request handler
      */
-    class Handler
+    class RequestHandler
     {
         public:
-            virtual inline ~Handler() {};
+            RequestHandler(Request& request);
+            virtual ~RequestHandler();
+
+        private:
+            Request* request; ///< Pointer to the assigned request
+
+        protected:
+            /**
+             * Gets the associated request
+             *
+             * @throws ::std::runtime_error When no request instance is assigned (nullptr).
+             * @return The associated request
+             */
+            Request& getRequest() throw (std::runtime_error);
+
+            /**
+             * Savely finish the request and invalidate the request reference
+             *
+             * @param[in]  status  The application exit code
+             */
+            void finish(uint16_t status);
+
+        public:
+            /**
+             * Called when a data fragment (STDIN, DATA) is received.
+             *
+             * By default this is a NOOP dummy
+             *
+             * @param[in]  record  The received record
+             */
+            virtual void onReceiveData(const protocol::Record& record);
+
+            /**
+             * Called when the server sends FCGI_ABORT_REQUEST
+             *
+             * By default this will call finish() with status code 1
+             */
+            virtual void onAbort();
+
+            /**
+             * Handle the assigned request
+             *
+             * @return Returns true when processing the request is complete,
+             * @return false if there are more actions to do.
+             * @return Returning false allows processing chunk wise allowing other requests
+             * @return in the same thread to complete.
+             */
+            virtual bool handle() = 0;
+    };
+
+    typedef ::std::shared_ptr<RequestHandler> RequestHandlerPtr;
+
+    /**
+     * Interface for Handler implementations
+     */
+    class HandlerFactory
+    {
+        public:
+            virtual inline ~HandlerFactory() {};
 
         /**
          * Interface definition
@@ -299,20 +361,17 @@ namespace fastcgi
             virtual bool acceptRole(uint16_t role);
 
             /**
-             * Handle the given request
+             * Create a request handler for the given request
              *
-             * @return Returns true when processing the request is complete,
-             * @return false if there are more actions to do.
-             * @return Returning false allows processing chunk wise allowing other requests
-             * @return in the same thread to complete.
+             * @return A smart pointer to the created request handler
              */
-            virtual bool handle(Request& request) = 0;
+            virtual RequestHandlerPtr factory(Request& request) = 0;
     };
 
     /**
      * Shared pointer to a handler
      */
-    typedef std::shared_ptr<Handler> HandlerPtr;
+    typedef std::shared_ptr<HandlerFactory> HandlerFactoryPtr;
 
     /**
      * Worker callback
@@ -405,26 +464,28 @@ namespace fastcgi
     class Request
     {
         friend streams::OutStreamBuffer;
+        friend Client;
 
         public:
-            Request(const uint16_t& id, ClientPtr client);
+            enum class Role : uint16_t { RESPONDER = FCGI_RESPONDER, AUTHORIZER = FCGI_AUTHORIZER, FILTER = FCGI_FILTER };
+
+        public:
+            Request(const uint16_t& id, Role role, ClientPtr client);
             ~Request();
 
-        public:
-            typedef std::shared_ptr<Client> ClientPtr;
-            enum class HTTPMethod { GET, SET, PUT, POST, DELETE };
-            enum class Role : uint16_t { RESPONDER = FCGI_RESPONDER, AUTHORIZER = FCGI_AUTHORIZER, FILTER = FCGI_FILTER };
+        private:
+            streams::InStream paramStream;
 
         protected:
             uint16_t id;
             std::map<std::string, std::string> params;
-            std::map<unsigned char, bool> streamStates;
             Role role;
+
             bool valid;
             bool ready;
 
             // Streams:
-            streams::InStream _params;
+
             streams::InStream _stdin;
             streams::InStream _datain;
             streams::OutStream _stdout;
@@ -432,45 +493,84 @@ namespace fastcgi
 
             // Client ref
             ClientPtr client;
+            RequestHandlerPtr handler;
 
             void processIncommingRecord(const protocol::Record& record);
 
         public:
+            /**
+             * Send a message to the fastcgi client
+             *
+             * @param[in]  msg  The message to send
+             */
             void send(protocol::Message& msg);
+
+            /**
+             * Send the end request record to the client and mark this request invalid
+             *
+             * Note: When calling from a handler, the request should be considered as destroyed after the call.
+             *
+             * @param[in]  status  The application status code
+             */
             void finish(uint32_t status);
 
+            /**
+             * Set the request handler
+             */
+            void setHandler(RequestHandlerPtr handler);
+
+            /**
+             * get the std stream
+             */
             inline streams::InStream& getStdIn()
             {
                 return this->_stdin;
             }
 
+            /**
+             * get the data stream
+             */
             inline streams::InStream& getDataStream()
             {
                 return this->_datain;
             }
 
+            /**
+             * get the stdout stream
+             */
             inline streams::OutStream& getStdOut()
             {
                 return this->_stdout;
             }
 
+            /**
+             * get the stderr stream
+             */
             inline streams::OutStream& getStdErr()
             {
                 return this->_stderr;
             }
 
             /**
-             * Returns the request id
+             * Get the request id
              */
-            inline int getId() const
+            inline uint16_t getId() const
             {
                 return this->id;
             };
 
+            /**
+             * get the request role
+             */
             inline Role getRole() const
             {
                 return this->role;
             };
+
+            /**
+             * Check if this request is valid
+             */
+            bool isValid();
     };
 
     /**
@@ -484,7 +584,7 @@ namespace fastcgi
 
         public:
             //! Typedef: map of requestId to request object
-            typedef std::map<uint16_t, Request> RequestMap;
+            typedef std::map<uint16_t, std::shared_ptr<Request> > RequestMap;
 
 //            enum StreamType { STDOUT, STDERR };
 
@@ -509,7 +609,16 @@ namespace fastcgi
              * @param[in] event
              * @param[in] ptr   Pointer to the client instance
              */
-            static void eventReadCallback(bufferevent* event, void* arg);
+            static void eventReadCallback(bufferevent* event, void* ptr);
+
+            /**
+             * Timer callback to trigger gc
+             *
+             * @param[in]  fd         Ignored
+             * @param[in]  eventType  The event type that was triggered
+             * @param[in]  ptr        Pointer to the client instance
+             */
+            static void eventGcCallback(evutil_socket_t fd, short eventType, void* ptr);
 
 
         protected:
@@ -521,6 +630,7 @@ namespace fastcgi
 
             RequestMap requests; ///< current requests
             bool isValid;
+            bool keepConnection; ///< Keep the connection alive for further requests
 
             /**
              * Dispatch events
@@ -531,6 +641,16 @@ namespace fastcgi
              * Called when a read event occours
              */
             void onRead(bufferevent*);
+
+            /**
+             * Check if there is an active request with the given id
+             */
+            bool hasRequest(uint16_t id);
+
+            /**
+             * Perform garbage collection
+             */
+            void gc();
 
         private:
             size_t headerBytesRead;
@@ -563,6 +683,16 @@ namespace fastcgi
              * @return Returns the modified pointer after extracting the padding
              */
             char* extractPadding(char* buffer, size_t& size);
+
+            /**
+             * Reset the current record state
+             */
+            void resetRecordState();
+
+            /**
+             * Close the client connection and mark this client invalid
+             */
+            void destroy();
 
         public:
             /**
@@ -623,17 +753,29 @@ namespace fastcgi
              */
             static void eventErrorCallback(evconnlistener* event, void* arg);
 
+            /**
+             * Libevent helper - Callback for triggering gc
+             *
+             * @param[in]  fd  Ignored
+             */
+            static void eventGcCallback(int fd, short type, void* ptr);
+
+            /**
+             * Callback for signals
+             */
+            static void eventSignalCallback(int signal, short type, void* ptr);
+
 
         protected:
             typedef std::vector<ClientPtr> ClientList;
 
             int fd; ///< Filedescriptor for listening socket
 
+            timeval gcInterval;
             event_base* eventBase; ///< Event base instance
-            bufferevent* event;    ///< event instance
-            evconnlistener* listener; ///< Connection listener
+            std::list<event*> eventListeners; ///< Generic events event
 
-            std::vector<HandlerPtr> handlers; ///< Registered handlers
+            std::vector<HandlerFactoryPtr> handlers; ///< Registered handlers
             ClientList clients; ///< active clients
             WorkerQueue workerQueue;
 
@@ -658,28 +800,33 @@ namespace fastcgi
              */
             void gc();
 
+            /**
+             * Clear all event listeners
+             */
+            void clearListeners();
+
         public:
             /**
              * Add a handler
              *
-             * @param[in] handler  A shared pointer to a handler instance
+             * @param[in] factory  A shared pointer to a handler instance
              */
-            void addHandler(HandlerPtr handler);
+            void addHandlerFactory(HandlerFactoryPtr factory);
 
             /**
-             * Check if any handler accepst the given role
+             * Check if any handler factory accepts the given role
              *
              * @param[in] role The FCGI role to check
              */
             bool isRoleAccepted(uint16_t role);
 
             /**
-             * Returns the first handler that can handle the given role
+             * Returns the first handler factory that can handle the given role
              *
              * @param[in] role  The role to find a handler for
-             * @return The handler implementation
+             * @return The handler factory implementation
              */
-            HandlerPtr getHandler(uint16_t role);
+            HandlerFactoryPtr getHandlerFactory(uint16_t role);
 
             /**
              * Run the I/O event loop
