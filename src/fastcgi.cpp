@@ -601,66 +601,8 @@ namespace fastcgi
     // I/O Handler
     //
 
-    IOHandler::IOHandler(const std::string& bind) : IOHandler(0)
+    IOHandler::IOHandler(const std::string& bind) : bind(bind), IOHandler(0)
     {
-        std::regex ipv4regex("^(\d{1,3}(?:\.\d{1,3}){3})(\:([1-9][0-9]*))?$");
-        std::smatch m;
-
-        sockaddr_un bindUnix;
-        sockaddr_in bindIPv4;
-        sockaddr_in6 bindIPv6;
-        sockaddr* bindAddr = NULL;
-        size_t bindAddrLen = 0;
-
-        if (bind.substr(0, 5) == "unix:") {
-            if (bind.size() - 5 > 108) {
-                throw IOException("Unix path name too long for socket.");
-            }
-
-            memset(&bindUnix, 0, sizeof(bindUnix));
-            memcpy(&bindUnix.sun_path, bind.substr(5).c_str(), bind.size());
-
-            bindUnix.sun_family = AF_UNIX;
-            bindAddr = (sockaddr*)&bindUnix;
-            bindAddrLen = sizeof(bindUnix);
-
-            this->fd = socket(AF_LOCAL, SOCK_STREAM, 0);
-        } else if (std::regex_match(bind, m, ipv4regex)){
-            int port = 9800;
-
-            if ((m.size() >= 3) && m[3].matched) {
-                std::istringstream iss(m[3].str());
-                iss >> port;
-            }
-
-            bindIPv4.sin_family = AF_INET;
-            bindIPv4.sin_port = htons(port);
-
-            if (m[1].str() == "0.0.0.0") {
-                bindIPv4.sin_addr.s_addr = INADDR_ANY;
-            } else {
-                // TODO: Bind specific address
-                bindIPv4.sin_addr.s_addr = INADDR_ANY;
-            }
-
-            this->fd = socket(AF_INET, SOCK_STREAM, 0);
-        // } else if () { // TODO: IPv6
-        } else {
-            std::ostringstream oss;
-            oss << "Invalid bind expression: \"" << bind << "\"";
-            throw IOException(oss.str());
-        }
-
-        if (::bind(this->fd, bindAddr, bindAddrLen) < 0) {
-            close(this->fd);
-            std::ostringstream oss;
-            oss << "Failed to bind socket to \"" << bind << "\"";
-            throw IOException(oss.str());
-        }
-
-        if (!setNonBlocking(this->fd)) {
-            throw IOException("Failed to make listener socket non blocking");
-        }
     }
 
     IOHandler::IOHandler(int socket) :
@@ -730,9 +672,81 @@ namespace fastcgi
         throw IOException(oss.str());
     }
 
+    ///! Create the socket connection
+    void IOHandler::createListenerSocket()
+    {
+        if (this->fd != 0) {
+            return;
+        }
+
+        std::regex ipv4regex("^(\d{1,3}(?:\.\d{1,3}){3})(\:([1-9][0-9]*))?$");
+        std::smatch m;
+
+        sockaddr_un bindUnix;
+        sockaddr_in bindIPv4;
+        sockaddr_in6 bindIPv6;
+        sockaddr* bindAddr = NULL;
+        size_t bindAddrLen = 0;
+
+        if (bind.substr(0, 5) == "unix:") {
+            if (bind.size() - 5 > 108) {
+                throw IOException("Unix path name too long for socket.");
+            }
+
+            memset(&bindUnix, 0, sizeof(bindUnix));
+            memcpy(&bindUnix.sun_path, bind.substr(5).c_str(), bind.size());
+
+            bindUnix.sun_family = AF_UNIX;
+            bindAddr = (sockaddr*)&bindUnix;
+            bindAddrLen = sizeof(bindUnix);
+
+            this->fd = socket(AF_LOCAL, SOCK_STREAM, 0);
+        } else if (std::regex_match(bind, m, ipv4regex)){
+            int port = 9800;
+
+            if ((m.size() >= 3) && m[3].matched) {
+                std::istringstream iss(m[3].str());
+                iss >> port;
+            }
+
+            bindIPv4.sin_family = AF_INET;
+            bindIPv4.sin_port = htons(port);
+
+            std::string addr = m[1].str();
+
+            if (addr == "0.0.0.0") {
+                bindIPv4.sin_addr.s_addr = INADDR_ANY;
+            } else {
+                // TODO: Bind specific address
+                // gethostbyaddr(addr.c_str(), addr.size());
+                bindIPv4.sin_addr.s_addr = INADDR_ANY;
+            }
+
+            this->fd = socket(AF_INET, SOCK_STREAM, 0);
+        // } else if () { // TODO: IPv6
+        } else {
+            std::ostringstream oss;
+            oss << "Invalid bind expression: \"" << bind << "\"";
+            throw IOException(oss.str());
+        }
+
+        if (::bind(this->fd, bindAddr, bindAddrLen) < 0) {
+            close(this->fd);
+            std::ostringstream oss;
+            oss << "Failed to bind socket to \"" << bind << "\"";
+            throw IOException(oss.str());
+        }
+
+        if (!setNonBlocking(this->fd)) {
+            throw IOException("Failed to make listener socket non blocking");
+        }
+    }
+
     //! Run the IO handler thread
     void IOHandler::run(unsigned int workerCount)
     {
+        this->createListenerSocket();
+
         auto gc = event_new(this->eventBase, -1, EV_PERSIST, IOHandler::eventGcCallback, this);
         auto sig = evsignal_new(this->eventBase, SIGTERM, IOHandler::eventSignalCallback, this);
         auto listener = evconnlistener_new(this->eventBase, IOHandler::eventAcceptCallback, this, LEV_OPT_REUSEABLE, -1, this->fd);

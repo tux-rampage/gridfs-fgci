@@ -769,6 +769,7 @@ namespace fastcgi
         protected:
             typedef std::vector<ClientPtr> ClientList;
 
+            std::string bind;
             int fd; ///< Filedescriptor for listening socket
 
             timeval gcInterval;
@@ -785,6 +786,8 @@ namespace fastcgi
          * Handler methods
          */
         protected:
+            void createListenerSocket();
+
             /**
              * Called to accept a new client connection
              */
